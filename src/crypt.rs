@@ -1,6 +1,6 @@
 use std::{
     fs::{File, create_dir},
-    io::{BufRead, Cursor, Read, Seek, SeekFrom, Write},
+    io::{BufRead, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -81,7 +81,7 @@ fn decrypt_stream(
     // let aes_iv = get_iv(iv_seed.into());
 
     let mut decompressed_reader = ZlibDecoder::new(AesDecryptor::new(
-        Cursor::new(&kb_buffer[0x30..]).chain(reader),
+        (&kb_buffer[0x30..]).chain(reader),
         size,
         iv_seed,
     ));

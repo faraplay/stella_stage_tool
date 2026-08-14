@@ -137,13 +137,14 @@ fn get_iv(seed: u64) -> [u8; 16] {
     aes_iv
 }
 
+const BUF_SIZE: usize = 0x8000;
 struct AesDecryptor<R>
 where
     R: Read,
 {
     reader: R,
     aes: Decryptor<Aes192>,
-    buffer: [u8; 0x2000],
+    buffer: [u8; BUF_SIZE],
     fill_count: usize,
     used_count: usize,
 }
@@ -154,7 +155,7 @@ impl<R: Read> AesDecryptor<R> {
         AesDecryptor {
             reader,
             aes,
-            buffer: [0u8; 0x2000],
+            buffer: [0u8; BUF_SIZE],
             fill_count: 0,
             used_count: 0,
         }

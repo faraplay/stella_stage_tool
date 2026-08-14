@@ -1,6 +1,6 @@
 use std::{
     fs::{File, create_dir},
-    io::{Cursor, Read, Seek, SeekFrom, Write},
+    io::{BufRead, Cursor, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -9,7 +9,7 @@ use aes::{
     cipher::{Array, BlockModeDecrypt, KeyIvInit},
 };
 use cbc::Decryptor;
-use flate2::write::ZlibDecoder;
+use flate2::bufread::ZlibDecoder;
 
 use crate::crypt::error::CryptError;
 
@@ -41,7 +41,7 @@ pub fn decrypt_directory(in_path: &Path, out_path: &Path) -> Result<(), CryptErr
             match decrypt_file(&new_in_path, &new_out_path) {
                 Ok(_) => {}
                 Err(error) => {
-                    eprintln!("Failed to decrypt {}: {error}", new_in_path.display());
+                    eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
                 }
             }
         }
@@ -74,14 +74,19 @@ fn decrypt_stream(
     let mut kb_buffer = vec![0u8; std::cmp::min(size, 0x400) as usize];
     reader.read_exact(&mut kb_buffer)?;
     decrypt_first_kb(&mut kb_buffer, size)?;
-    let aes_key = get_aes_key(size);
-    let iv_seed = u32::from_le_bytes(kb_buffer[0x24..0x28].try_into().unwrap());
-    let aes_iv = get_iv(iv_seed.into());
+    // let aes_key = get_aes_key(size);
+    let iv_seed: u64 = u32::from_le_bytes(kb_buffer[0x24..0x28].try_into().unwrap()).into();
+    let decompressed_file_size: u64 =
+        u32::from_le_bytes(kb_buffer[0x28..0x2c].try_into().unwrap()).into();
+    // let aes_iv = get_iv(iv_seed.into());
 
-    let mut encrypted_reader = Cursor::new(&kb_buffer[0x30..]).chain(reader);
-    let mut zlib_writer = ZlibDecoder::new(writer);
-    aes_decrypt(&aes_key, &aes_iv, &mut encrypted_reader, &mut zlib_writer)?;
-    zlib_writer.finish()?;
+    let mut decompressed_reader = ZlibDecoder::new(AesDecryptor::new(
+        Cursor::new(&kb_buffer[0x30..]).chain(reader),
+        size,
+        iv_seed,
+    ));
+    let out_file_size = std::io::copy(&mut decompressed_reader, writer)?;
+    assert_eq!(decompressed_file_size, out_file_size);
     Ok(())
 }
 
@@ -132,46 +137,73 @@ fn get_iv(seed: u64) -> [u8; 16] {
     aes_iv
 }
 
-fn aes_decrypt(
-    aes_key: &[u8; 24],
-    aes_iv: &[u8; 16],
-    reader: &mut impl Read,
-    writer: &mut impl Write,
-) -> Result<(), CryptError> {
-    let mut aes = Decryptor::<Aes192>::new(aes_key.into(), aes_iv.into());
-    let mut buffer = [0u8; 0x1000];
-    let mut last_nonzero_index = buffer.len();
-    loop {
-        // write out the zeros from the previous iteration
-        // note that the value of fill_count on the previous iteration must be buffer.len()
-        writer.write_all(&buffer[last_nonzero_index..])?;
-        let mut fill_count = 0;
-        while fill_count < buffer.len() {
-            let read_count = reader.read(&mut buffer[fill_count..])?;
+struct AesDecryptor<R>
+where
+    R: Read,
+{
+    reader: R,
+    aes: Decryptor<Aes192>,
+    buffer: [u8; 0x2000],
+    fill_count: usize,
+    used_count: usize,
+}
+
+impl<R: Read> AesDecryptor<R> {
+    pub fn new(reader: R, key_seed: u64, iv_seed: u64) -> Self {
+        let aes = Decryptor::<Aes192>::new(&get_aes_key(key_seed).into(), &get_iv(iv_seed).into());
+        AesDecryptor {
+            reader,
+            aes,
+            buffer: [0u8; 0x2000],
+            fill_count: 0,
+            used_count: 0,
+        }
+    }
+
+    fn buf(&self) -> &[u8] {
+        &self.buffer[self.used_count..self.fill_count]
+    }
+}
+
+impl<R: Read> Read for AesDecryptor<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let my_buf = self.fill_buf()?;
+        let out_count = std::cmp::min(buf.len(), my_buf.len());
+        buf[..out_count].copy_from_slice(&my_buf[..out_count]);
+        self.used_count += out_count;
+        Ok(out_count)
+    }
+}
+
+impl<R: Read> BufRead for AesDecryptor<R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.fill_count > self.used_count {
+            return Ok(self.buf());
+        }
+
+        self.used_count = 0;
+        self.fill_count = 0;
+        while self.fill_count < self.buffer.len() {
+            let read_count = self.reader.read(&mut self.buffer[self.fill_count..])?;
             if read_count == 0 {
                 break;
             }
-            fill_count += read_count;
+            self.fill_count += read_count;
         }
-        let (chunks, []) = Array::slice_as_chunks_mut(&mut buffer[..fill_count]) else {
-            return Err(CryptError::file_size_error(
+        let (chunks, []) = Array::slice_as_chunks_mut(&mut self.buffer[..self.fill_count]) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
                 "Buffer fill count is not a multiple of 16!",
             ));
         };
-        aes.decrypt_blocks(chunks);
-
-        // do not write trailing zeros on this iteration
-        last_nonzero_index = fill_count;
-        while last_nonzero_index > 0 {
-            if buffer[last_nonzero_index - 1] != 0 {
-                break;
-            }
-            last_nonzero_index -= 1;
-        }
-        writer.write_all(&buffer[..last_nonzero_index])?;
-        if fill_count < buffer.len() {
-            break;
-        }
+        self.aes.decrypt_blocks(chunks);
+        Ok(self.buf())
     }
-    Ok(())
+
+    fn consume(&mut self, amount: usize) {
+        self.used_count += amount;
+    }
 }

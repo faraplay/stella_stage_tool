@@ -38,7 +38,12 @@ pub fn decrypt_directory(in_path: &Path, out_path: &Path) -> Result<(), CryptErr
         if new_in_path.is_dir() {
             decrypt_directory(&new_in_path, &new_out_path)?;
         } else if new_in_path.is_file() {
-            decrypt_file(&new_in_path, &new_out_path)?;
+            match decrypt_file(&new_in_path, &new_out_path) {
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("Failed to decrypt {}: {error}", new_in_path.display());
+                }
+            }
         }
     }
     Ok(())

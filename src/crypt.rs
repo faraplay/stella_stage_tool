@@ -1,25 +1,34 @@
-use std::{
-    fs::{File, create_dir},
-    io::{Cursor, Read, Seek, SeekFrom, Write},
-    path::Path,
-};
+use std::{io::SeekFrom, path::Path};
 
 use aes::{
     Aes192,
     cipher::{Array, BlockModeDecrypt, KeyIvInit},
 };
 use cbc::Decryptor;
-use flate2::write::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress, Status};
+use tokio::{
+    fs::{File, create_dir, metadata, read_dir},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    task::JoinSet,
+};
 
-use crate::crypt::error::CryptError;
-
-mod error;
 mod prng;
 
 /// Decrypt all files in a directory. Searches the directory recursively.
-pub fn decrypt_directory(in_path: &Path, out_path: &Path) -> Result<(), CryptError> {
+pub async fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+    let mut set = JoinSet::new();
+    decrypt_directory_inner(in_path, out_path, &mut set).await?;
+    set.join_all().await;
+    Ok(())
+}
+
+async fn decrypt_directory_inner(
+    in_path: &Path,
+    out_path: &Path,
+    join_set: &mut JoinSet<()>,
+) -> std::io::Result<()> {
     // try to create output directory
-    let create_result = create_dir(out_path);
+    let create_result = create_dir(out_path).await;
     match create_result {
         Ok(_) => {}
         Err(error) => {
@@ -30,63 +39,83 @@ pub fn decrypt_directory(in_path: &Path, out_path: &Path) -> Result<(), CryptErr
     }
 
     // recurse over entries
-    let in_dir = std::fs::read_dir(in_path)?;
-    for entry in in_dir {
-        let entry = entry?;
+    let mut in_dir = read_dir(in_path).await?;
+    while let Some(entry) = in_dir.next_entry().await? {
         let new_in_path = entry.path();
         let new_out_path = out_path.join(new_in_path.file_name().unwrap());
-        if new_in_path.is_dir() {
-            decrypt_directory(&new_in_path, &new_out_path)?;
-        } else if new_in_path.is_file() {
-            decrypt_file(&new_in_path, &new_out_path)?;
+        let entry_metadata = metadata(&new_in_path).await?;
+        if entry_metadata.is_dir() {
+            Box::pin(decrypt_directory_inner(
+                &new_in_path,
+                &new_out_path,
+                join_set,
+            ))
+            .await?;
+        } else if entry_metadata.is_file() {
+            join_set.spawn(async move {
+                match decrypt_file(&new_in_path, &new_out_path).await {
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                    }
+                }
+            });
         }
     }
     Ok(())
 }
 
 /// Decrypts a file.
-pub fn decrypt_file(in_path: &Path, out_path: &Path) -> Result<(), CryptError> {
-    let mut reader = File::open(in_path)?;
-    let mut writer = File::create(out_path)?;
-    decrypt_stream(&mut reader, &mut writer)?;
+pub async fn decrypt_file(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+    let mut reader = File::open(in_path).await?;
+    let mut writer = File::create(out_path).await?;
+    decrypt_stream(&mut reader, &mut writer).await?;
     Ok(())
 }
 
-fn decrypt_stream(
-    reader: &mut (impl Read + Seek),
-    writer: &mut impl Write,
-) -> Result<(), CryptError> {
-    let size = reader.seek(SeekFrom::End(0))?;
+async fn decrypt_stream(
+    reader: &mut (impl AsyncReadExt + AsyncSeekExt + Unpin),
+    writer: &mut (impl AsyncWriteExt + Unpin),
+) -> std::io::Result<()> {
+    let size = reader.seek(SeekFrom::End(0)).await?;
     if size % 16 != 0 {
-        return Err(CryptError::file_size_error(
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
             "File size is not a multiple of 16!",
         ));
     }
     if size < 0x30 {
-        return Err(CryptError::file_size_error("File to decrypt is too small!"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "File to decrypt is too small!",
+        ));
     }
-    reader.seek(SeekFrom::Start(0))?;
-    let mut kb_buffer = vec![0u8; std::cmp::min(size, 0x400) as usize];
-    reader.read_exact(&mut kb_buffer)?;
-    decrypt_first_kb(&mut kb_buffer, size)?;
-    let aes_key = get_aes_key(size);
-    let iv_seed = u32::from_le_bytes(kb_buffer[0x24..0x28].try_into().unwrap());
-    let aes_iv = get_iv(iv_seed.into());
+    reader.seek(SeekFrom::Start(0)).await?;
+    let mut in_data = Vec::new();
+    reader.read_to_end(&mut in_data).await?;
 
-    let mut encrypted_reader = Cursor::new(&kb_buffer[0x30..]).chain(reader);
-    let mut zlib_writer = ZlibDecoder::new(writer);
-    aes_decrypt(&aes_key, &aes_iv, &mut encrypted_reader, &mut zlib_writer)?;
-    zlib_writer.finish()?;
+    decrypt_first_kb(&mut in_data[..std::cmp::min(size, 0x400) as usize], size)?;
+
+    let iv_seed: u64 = u32::from_le_bytes(in_data[0x24..0x28].try_into().unwrap()).into();
+    let decompressed_file_size: u64 =
+        u32::from_le_bytes(in_data[0x28..0x2c].try_into().unwrap()).into();
+
+    let aes_key = get_aes_key(size);
+    let aes_iv = get_iv(iv_seed.into());
+    decrypt(&aes_key, &aes_iv, &mut in_data[0x30..])?;
+    let out_file_size = decompress(&in_data[0x30..], writer).await?;
+    assert_eq!(decompressed_file_size, out_file_size);
     Ok(())
 }
 
-fn decrypt_first_kb(kb_buffer: &mut [u8], seed: u64) -> Result<(), CryptError> {
+fn decrypt_first_kb(kb_buffer: &mut [u8], seed: u64) -> std::io::Result<()> {
     let mut my_prng = prng::MyPrng::new(seed);
     for _ in 0..5 {
         my_prng.next_u64();
     }
     let (chunks, []) = kb_buffer.as_chunks_mut::<4>() else {
-        return Err(CryptError::file_size_error(
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
             "File size is not a multiple of 4!",
         ));
     };
@@ -127,46 +156,35 @@ fn get_iv(seed: u64) -> [u8; 16] {
     aes_iv
 }
 
-fn aes_decrypt(
-    aes_key: &[u8; 24],
-    aes_iv: &[u8; 16],
-    reader: &mut impl Read,
-    writer: &mut impl Write,
-) -> Result<(), CryptError> {
-    let mut aes = Decryptor::<Aes192>::new(aes_key.into(), aes_iv.into());
-    let mut buffer = [0u8; 0x1000];
-    let mut last_nonzero_index = buffer.len();
-    loop {
-        // write out the zeros from the previous iteration
-        // note that the value of fill_count on the previous iteration must be buffer.len()
-        writer.write_all(&buffer[last_nonzero_index..])?;
-        let mut fill_count = 0;
-        while fill_count < buffer.len() {
-            let read_count = reader.read(&mut buffer[fill_count..])?;
-            if read_count == 0 {
-                break;
-            }
-            fill_count += read_count;
-        }
-        let (chunks, []) = Array::slice_as_chunks_mut(&mut buffer[..fill_count]) else {
-            return Err(CryptError::file_size_error(
-                "Buffer fill count is not a multiple of 16!",
-            ));
-        };
-        aes.decrypt_blocks(chunks);
+fn decrypt(key: &[u8; 24], iv: &[u8; 16], data: &mut [u8]) -> std::io::Result<()> {
+    let mut decryptor = Decryptor::<Aes192>::new(key.into(), iv.into());
+    let (chunks, []) = Array::slice_as_chunks_mut(data) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Buffer fill count is not a multiple of 16!",
+        ));
+    };
+    decryptor.decrypt_blocks(chunks);
+    Ok(())
+}
 
-        // do not write trailing zeros on this iteration
-        last_nonzero_index = fill_count;
-        while last_nonzero_index > 0 {
-            if buffer[last_nonzero_index - 1] != 0 {
-                break;
-            }
-            last_nonzero_index -= 1;
-        }
-        writer.write_all(&buffer[..last_nonzero_index])?;
-        if fill_count < buffer.len() {
-            break;
+async fn decompress(
+    compressed_data: &[u8],
+    writer: &mut (impl AsyncWriteExt + Unpin),
+) -> std::io::Result<u64> {
+    const BUF_SIZE: usize = 0x8000;
+    let mut buffer = Vec::with_capacity(BUF_SIZE);
+    let mut decompress = Decompress::new(true);
+    loop {
+        buffer.clear();
+        let status = decompress.decompress_vec(
+            &compressed_data[decompress.total_in() as usize..],
+            &mut buffer,
+            FlushDecompress::None,
+        )?;
+        writer.write_all(&buffer).await?;
+        if status == Status::StreamEnd {
+            return Ok(decompress.total_out());
         }
     }
-    Ok(())
 }

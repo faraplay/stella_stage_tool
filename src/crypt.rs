@@ -9,7 +9,7 @@ use aes::{
     cipher::{Array, BlockModeDecrypt, KeyIvInit},
 };
 use cbc::Decryptor;
-use flate2::bufread::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress, Status};
 
 mod prng;
 
@@ -81,8 +81,7 @@ fn decrypt_stream(reader: &mut (impl Read + Seek), writer: &mut impl Write) -> s
     let aes_key = get_aes_key(size);
     let aes_iv = get_iv(iv_seed.into());
     decrypt(&aes_key, &aes_iv, &mut in_data[0x30..])?;
-    let mut decompressed_reader = ZlibDecoder::new(&in_data[0x30..]);
-    let out_file_size = std::io::copy(&mut decompressed_reader, writer)?;
+    let out_file_size = decompress(&in_data[0x30..], writer)?;
     assert_eq!(decompressed_file_size, out_file_size);
     Ok(())
 }
@@ -145,4 +144,22 @@ fn decrypt(key: &[u8; 24], iv: &[u8; 16], data: &mut [u8]) -> std::io::Result<()
     };
     decryptor.decrypt_blocks(chunks);
     Ok(())
+}
+
+fn decompress(compressed_data: &[u8], writer: &mut impl Write) -> std::io::Result<u64> {
+    const BUF_SIZE: usize = 0x8000;
+    let mut buffer = Vec::with_capacity(BUF_SIZE);
+    let mut decompress = Decompress::new(true);
+    loop {
+        buffer.clear();
+        let status = decompress.decompress_vec(
+            &compressed_data[decompress.total_in() as usize..],
+            &mut buffer,
+            FlushDecompress::None,
+        )?;
+        writer.write_all(&buffer)?;
+        if status == Status::StreamEnd {
+            return Ok(decompress.total_out());
+        }
+    }
 }

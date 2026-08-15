@@ -1,6 +1,7 @@
 use std::{path::PathBuf, time::Instant};
 
 use clap::{Parser, Subcommand};
+use tokio::task::JoinSet;
 
 mod crypt;
 
@@ -36,9 +37,11 @@ async fn main() {
         } => {
             let now = Instant::now();
             if *recursive {
-                crypt::decrypt_directory(in_path, out_path)
+                let mut set = JoinSet::new();
+                crypt::decrypt_directory(in_path, out_path, &mut set)
                     .await
-                    .expect("Failed to decrypt all files!");
+                    .expect("Failed to read directory contents!");
+                set.join_all().await;
                 eprintln!("Decrypted all files.")
             } else {
                 crypt::decrypt_file(in_path, out_path)

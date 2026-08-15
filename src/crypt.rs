@@ -9,12 +9,17 @@ use flate2::{Decompress, FlushDecompress, Status};
 use tokio::{
     fs::{File, create_dir, metadata, read_dir},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    task::JoinSet,
 };
 
 mod prng;
 
 /// Decrypt all files in a directory. Searches the directory recursively.
-pub async fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+pub async fn decrypt_directory(
+    in_path: &Path,
+    out_path: &Path,
+    join_set: &mut JoinSet<()>,
+) -> std::io::Result<()> {
     // try to create output directory
     let create_result = create_dir(out_path).await;
     match create_result {
@@ -33,14 +38,16 @@ pub async fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Resu
         let new_out_path = out_path.join(new_in_path.file_name().unwrap());
         let entry_metadata = metadata(&new_in_path).await?;
         if entry_metadata.is_dir() {
-            Box::pin(decrypt_directory(&new_in_path, &new_out_path)).await?;
+            Box::pin(decrypt_directory(&new_in_path, &new_out_path, join_set)).await?;
         } else if entry_metadata.is_file() {
-            match decrypt_file(&new_in_path, &new_out_path).await {
-                Ok(_) => {}
-                Err(error) => {
-                    eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+            join_set.spawn(async move {
+                match decrypt_file(&new_in_path, &new_out_path).await {
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                    }
                 }
-            }
+            });
         }
     }
     Ok(())

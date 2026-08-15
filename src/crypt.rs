@@ -15,7 +15,14 @@ use tokio::{
 mod prng;
 
 /// Decrypt all files in a directory. Searches the directory recursively.
-pub async fn decrypt_directory(
+pub async fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+    let mut set = JoinSet::new();
+    decrypt_directory_inner(in_path, out_path, &mut set).await?;
+    set.join_all().await;
+    Ok(())
+}
+
+async fn decrypt_directory_inner(
     in_path: &Path,
     out_path: &Path,
     join_set: &mut JoinSet<()>,
@@ -38,7 +45,12 @@ pub async fn decrypt_directory(
         let new_out_path = out_path.join(new_in_path.file_name().unwrap());
         let entry_metadata = metadata(&new_in_path).await?;
         if entry_metadata.is_dir() {
-            Box::pin(decrypt_directory(&new_in_path, &new_out_path, join_set)).await?;
+            Box::pin(decrypt_directory_inner(
+                &new_in_path,
+                &new_out_path,
+                join_set,
+            ))
+            .await?;
         } else if entry_metadata.is_file() {
             join_set.spawn(async move {
                 match decrypt_file(&new_in_path, &new_out_path).await {

@@ -22,6 +22,18 @@ pub async fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Resu
     Ok(())
 }
 
+/// Encrypt all files in a directory. Searches the directory recursively.
+pub async fn encrypt_directory(
+    in_path: &Path,
+    out_path: &Path,
+    small: bool,
+) -> std::io::Result<()> {
+    let mut set = JoinSet::new();
+    encrypt_directory_inner(in_path, out_path, small, &mut set).await?;
+    set.join_all().await;
+    Ok(())
+}
+
 async fn decrypt_directory_inner(
     in_path: &Path,
     out_path: &Path,
@@ -57,6 +69,51 @@ async fn decrypt_directory_inner(
                     Ok(_) => {}
                     Err(error) => {
                         eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                    }
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn encrypt_directory_inner(
+    in_path: &Path,
+    out_path: &Path,
+    small: bool,
+    join_set: &mut JoinSet<()>,
+) -> std::io::Result<()> {
+    // try to create output directory
+    let create_result = create_dir(out_path).await;
+    match create_result {
+        Ok(_) => {}
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                Err(error)?;
+            }
+        }
+    }
+
+    // recurse over entries
+    let mut in_dir = read_dir(in_path).await?;
+    while let Some(entry) = in_dir.next_entry().await? {
+        let new_in_path = entry.path();
+        let new_out_path = out_path.join(new_in_path.file_name().unwrap());
+        let entry_metadata = metadata(&new_in_path).await?;
+        if entry_metadata.is_dir() {
+            Box::pin(encrypt_directory_inner(
+                &new_in_path,
+                &new_out_path,
+                small,
+                join_set,
+            ))
+            .await?;
+        } else if entry_metadata.is_file() {
+            join_set.spawn(async move {
+                match encrypt_file(&new_in_path, &new_out_path, small).await {
+                    Ok(_) => {}
+                    Err(error) => {
+                        eprintln!("Failed to encrypt {}: {error:?}", new_in_path.display());
                     }
                 }
             });

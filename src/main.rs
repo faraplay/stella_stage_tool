@@ -70,11 +70,10 @@ async fn main() {
         } => {
             let now = Instant::now();
             if *recursive {
-                unimplemented!();
-                // crypt::encrypt_directory(in_path, out_path, *small)
-                //     .await
-                //     .expect("Failed to encrypt files in directory!");
-                // eprintln!("Encrypted files in directory.")
+                crypt::encrypt_directory(in_path, out_path, *small)
+                    .await
+                    .expect("Failed to encrypt files in directory!");
+                eprintln!("Encrypted files in directory.")
             } else {
                 crypt::encrypt_file(in_path, out_path, *small)
                     .await

@@ -24,7 +24,8 @@ enum Commands {
     },
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
@@ -35,10 +36,14 @@ fn main() {
         } => {
             let now = Instant::now();
             if *recursive {
-                crypt::decrypt_directory(in_path, out_path).expect("Failed to decrypt all files!");
+                crypt::decrypt_directory(in_path, out_path)
+                    .await
+                    .expect("Failed to decrypt all files!");
                 eprintln!("Decrypted all files.")
             } else {
-                crypt::decrypt_file(in_path, out_path).expect("Failed to decrypt file!");
+                crypt::decrypt_file(in_path, out_path)
+                    .await
+                    .expect("Failed to decrypt file!");
                 eprintln!("Decrypted file.")
             }
             let elapsed = now.elapsed();

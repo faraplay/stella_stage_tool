@@ -1,8 +1,4 @@
-use std::{
-    fs::{File, create_dir},
-    io::{Read, Seek, SeekFrom, Write},
-    path::Path,
-};
+use std::{io::SeekFrom, path::Path};
 
 use aes::{
     Aes192,
@@ -10,13 +6,17 @@ use aes::{
 };
 use cbc::Decryptor;
 use flate2::{Decompress, FlushDecompress, Status};
+use tokio::{
+    fs::{File, create_dir, metadata, read_dir},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+};
 
 mod prng;
 
 /// Decrypt all files in a directory. Searches the directory recursively.
-pub fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+pub async fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
     // try to create output directory
-    let create_result = create_dir(out_path);
+    let create_result = create_dir(out_path).await;
     match create_result {
         Ok(_) => {}
         Err(error) => {
@@ -27,15 +27,15 @@ pub fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()>
     }
 
     // recurse over entries
-    let in_dir = std::fs::read_dir(in_path)?;
-    for entry in in_dir {
-        let entry = entry?;
+    let mut in_dir = read_dir(in_path).await?;
+    while let Some(entry) = in_dir.next_entry().await? {
         let new_in_path = entry.path();
         let new_out_path = out_path.join(new_in_path.file_name().unwrap());
-        if new_in_path.is_dir() {
-            decrypt_directory(&new_in_path, &new_out_path)?;
-        } else if new_in_path.is_file() {
-            match decrypt_file(&new_in_path, &new_out_path) {
+        let entry_metadata = metadata(&new_in_path).await?;
+        if entry_metadata.is_dir() {
+            Box::pin(decrypt_directory(&new_in_path, &new_out_path)).await?;
+        } else if entry_metadata.is_file() {
+            match decrypt_file(&new_in_path, &new_out_path).await {
                 Ok(_) => {}
                 Err(error) => {
                     eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
@@ -47,15 +47,18 @@ pub fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()>
 }
 
 /// Decrypts a file.
-pub fn decrypt_file(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
-    let mut reader = File::open(in_path)?;
-    let mut writer = File::create(out_path)?;
-    decrypt_stream(&mut reader, &mut writer)?;
+pub async fn decrypt_file(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+    let mut reader = File::open(in_path).await?;
+    let mut writer = File::create(out_path).await?;
+    decrypt_stream(&mut reader, &mut writer).await?;
     Ok(())
 }
 
-fn decrypt_stream(reader: &mut (impl Read + Seek), writer: &mut impl Write) -> std::io::Result<()> {
-    let size = reader.seek(SeekFrom::End(0))?;
+async fn decrypt_stream(
+    reader: &mut (impl AsyncReadExt + AsyncSeekExt + Unpin),
+    writer: &mut (impl AsyncWriteExt + Unpin),
+) -> std::io::Result<()> {
+    let size = reader.seek(SeekFrom::End(0)).await?;
     if size % 16 != 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -68,9 +71,9 @@ fn decrypt_stream(reader: &mut (impl Read + Seek), writer: &mut impl Write) -> s
             "File to decrypt is too small!",
         ));
     }
-    reader.seek(SeekFrom::Start(0))?;
+    reader.seek(SeekFrom::Start(0)).await?;
     let mut in_data = Vec::new();
-    reader.read_to_end(&mut in_data)?;
+    reader.read_to_end(&mut in_data).await?;
 
     decrypt_first_kb(&mut in_data[..std::cmp::min(size, 0x400) as usize], size)?;
 
@@ -81,7 +84,7 @@ fn decrypt_stream(reader: &mut (impl Read + Seek), writer: &mut impl Write) -> s
     let aes_key = get_aes_key(size);
     let aes_iv = get_iv(iv_seed.into());
     decrypt(&aes_key, &aes_iv, &mut in_data[0x30..])?;
-    let out_file_size = decompress(&in_data[0x30..], writer)?;
+    let out_file_size = decompress(&in_data[0x30..], writer).await?;
     assert_eq!(decompressed_file_size, out_file_size);
     Ok(())
 }
@@ -146,7 +149,10 @@ fn decrypt(key: &[u8; 24], iv: &[u8; 16], data: &mut [u8]) -> std::io::Result<()
     Ok(())
 }
 
-fn decompress(compressed_data: &[u8], writer: &mut impl Write) -> std::io::Result<u64> {
+async fn decompress(
+    compressed_data: &[u8],
+    writer: &mut (impl AsyncWriteExt + Unpin),
+) -> std::io::Result<u64> {
     const BUF_SIZE: usize = 0x8000;
     let mut buffer = Vec::with_capacity(BUF_SIZE);
     let mut decompress = Decompress::new(true);
@@ -157,7 +163,7 @@ fn decompress(compressed_data: &[u8], writer: &mut impl Write) -> std::io::Resul
             &mut buffer,
             FlushDecompress::None,
         )?;
-        writer.write_all(&buffer)?;
+        writer.write_all(&buffer).await?;
         if status == Status::StreamEnd {
             return Ok(decompress.total_out());
         }

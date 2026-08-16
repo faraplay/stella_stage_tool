@@ -161,7 +161,7 @@ struct Jxb {
 
     #[br(parse_with = args_iter(
         node_data_as.iter().map(
-            |a| (b_region_pos + a.b_offset, a.tag_version, a.tag_count)
+            |a| (b_region_pos + a.b_offset, a.tags_type_id, a.tag_count)
         )
     ))]
     node_data_bs: Vec<JxbNodeDataB>,
@@ -261,7 +261,7 @@ struct Jxb {
 #[derive(Debug)]
 struct JxbNodeDataA {
     #[br(magic = b"\x03\0")]
-    tag_version: u16,
+    tags_type_id: u16,
     tag_count: u32,
     b_offset: i32,
     parent_index: i32,
@@ -270,7 +270,7 @@ struct JxbNodeDataA {
 #[binread]
 #[br(little)]
 #[br(stream = reader)]
-#[br(import(expected_offset: i32, tag_version: u16, extra_count: u32))]
+#[br(import(expected_offset: i32, tags_type_id: u16, extra_count: u32))]
 #[br(pre_assert(
     reader.stream_position().map_or(false, |pos| pos == expected_offset as u64),
     "incorrect stream position for NodeDataB item, expected {:X}",
@@ -283,35 +283,31 @@ struct JxbNodeDataB {
     child_count: i32,
     text_offset: i32,
 
-    #[br(args { count: extra_count as usize, inner: (tag_version,) })]
+    #[br(args { count: extra_count as usize, inner: (tags_type_id,) })]
     tags: Vec<JxbTag>,
 
     #[br(temp)]
     #[br(try_calc(
         (||{
-            match tag_version {
+            match tags_type_id {
                 0 => if !tags.is_empty() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "tag version is 0 but there are tags present",
-                    ))
+                        "tags_type_id is 0 but there are tags present",
+                    ));
                 },
-                1 => if tags.iter().all(|tag| tag.type_id == 3) {
+                1 => if tags.iter().map(|tag| tag.type_id).collect::<HashSet<_>>().len() <= 1 {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "tag version is 1 but all tags present have type_id 3",
-                    ))
+                        "tags_type_id is 1 but all tags present have the same type_id",
+                    ));
                 },
-                3 => if tags.is_empty() {
+                _ => if tags.is_empty() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "tag version is 3 but there are no tags present",
-                    ))
+                        "tags_type_id is not 0 but there are no tags present",
+                    ));
                 },
-                _ => return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("unknown tag version {:#X}", tag_version),
-                )),
             };
             let mut key_offsets = HashSet::new();
             for tag in &tags {
@@ -319,7 +315,7 @@ struct JxbNodeDataB {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         format!("Duplicate tag key offset {}", tag.key_offset),
-                    ))
+                    ));
                 }
             }
             return Ok(());
@@ -330,11 +326,11 @@ struct JxbNodeDataB {
 
 #[binread]
 #[br(little)]
-#[br(import(tag_version: u16))]
+#[br(import(tags_type_id: u16))]
 #[derive(Debug)]
 struct JxbTag {
     key_offset: i32,
-    #[br(if(tag_version != 3, 3))]
+    #[br(if(tags_type_id == 1, tags_type_id as u32))]
     type_id: u32,
     value: i32,
 }
@@ -432,7 +428,6 @@ enum JxbValue<'a> {
     Float(f32),
     Int(i32),
     Bool(bool),
-    Other { type_id: u32, value: i32 },
 }
 
 fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&str> {
@@ -461,10 +456,15 @@ impl<'a> JxbValue<'a> {
                     ));
                 }
             }),
-            _ => JxbValue::Other {
-                type_id: b_tag.type_id,
-                value: b_tag.value,
-            },
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Invalid tag type! type_id: {:#X}, value: {:#X}",
+                        b_tag.type_id, b_tag.value
+                    ),
+                ));
+            }
         })
     }
 }

@@ -187,7 +187,14 @@ struct JxbDUtf16 {
 
 impl<'a> Jxb {
     fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
-        JxbNode::new(0, &self.record_as, &self.bs, &self.d_utf8s, &self.d_utf16s)
+        JxbNode::new(
+            0,
+            -1,
+            &self.record_as,
+            &self.bs,
+            &self.d_utf8s,
+            &self.d_utf16s
+        )
     }
 }
 
@@ -202,6 +209,7 @@ struct JxbNode<'a> {
 impl<'a> JxbNode<'a> {
     fn new(
         index: i32,
+        parent_index: i32,
         record_as: &'a [JxbA],
         bs: &'a [JxbB],
         utf8_strings: &'a BTreeMap<i32, String>,
@@ -209,6 +217,17 @@ impl<'a> JxbNode<'a> {
     ) -> std::io::Result<JxbNode<'a>> {
         let a = &record_as[index as usize];
         let b = &bs[index as usize];
+        if a.parent_index != parent_index {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Incorrect parent_index on node {:#X}! Expected {:#X}, value on node {:#X}",
+                    index,
+                    parent_index,
+                    a.parent_index
+                )
+            ));
+        }
         Ok(JxbNode {
             node_type: get_string(b.node_type_utf8_offset, utf8_strings)?,
             text: get_string(b.d_utf16_offset, utf16_strings)?,
@@ -220,7 +239,7 @@ impl<'a> JxbNode<'a> {
                 )))
                 .collect::<std::io::Result<_>>()?,
             children: (b.first_child_index..b.first_child_index + b.child_count).map(
-                |index| JxbNode::new(index, record_as, bs, utf8_strings, utf16_strings)
+                |child_index| JxbNode::new(child_index, index, record_as, bs, utf8_strings, utf16_strings)
             ).collect::<std::io::Result<_>>()?
         })
     }

@@ -53,6 +53,7 @@ struct Jxb {
     string_region_pos: i32,
 
     #[br(magic = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")] // 0x10 zero bytes
+    #[br(temp)]
     #[br(args { count: node_count as usize })]
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == b_region_pos as u64),
@@ -66,13 +67,54 @@ struct Jxb {
             |a| (b_region_pos + a.b_offset, a.tag_version, a.tag_count)
         )
     ))]
+    node_data_bs: Vec<JxbNodeDataB>,
+
+    #[br(temp)]
     #[br(align_after = 0x10)]
+    #[br(try_calc(
+        {
+            let mut child_index = 1;
+            node_data_bs.iter().enumerate().map(|(parent_index, b)| {
+                if b.child_count == 0 {
+                    if b.children_start_index != -1 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("node {:X} has no children but children_start_index is not -1", parent_index),
+                        ));
+                    } else {
+                        return Ok(());
+                    }
+                }
+                if b.children_start_index != child_index {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "node {:X} has children_start_index {:X}, expected {:X}",
+                            parent_index,
+                            b.children_start_index,
+                            child_index,
+                        ),
+                    ));
+                }
+                child_index = b.children_start_index + b.child_count;
+                for index in b.children_start_index..b.children_start_index + b.child_count {
+                    if node_data_as[index as usize].parent_index as usize != parent_index {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("node {:X} has incorrect parent index", index),
+                        ));
+                    }
+                }
+                Ok(())
+            }).collect::<std::io::Result<()>>()
+        }
+    ))]
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == key_string_offset_region_pos as u64),
         "incorrect stream position for key_string_offset_region_pos, expected {:X}",
         key_string_offset_region_pos
     ))]
-    node_data_bs: Vec<JxbNodeDataB>,
+    assertion1: (),
 
     #[br(args { count: key_string_count as usize })]
     #[br(align_after = 0x10)]
@@ -142,7 +184,7 @@ struct JxbNodeDataA {
 #[derive(Debug)]
 struct JxbNodeDataB {
     node_type_offset: i32,
-    first_child_index: i32,
+    children_start_index: i32,
     child_count: i32,
     text_offset: i32,
 
@@ -213,8 +255,6 @@ impl<'a> Jxb {
     fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
         JxbNode::new(
             0,
-            -1,
-            &self.node_data_as,
             &self.node_data_bs,
             &self.utf8_strings,
             &self.utf16_strings,
@@ -233,23 +273,11 @@ struct JxbNode<'a> {
 impl<'a> JxbNode<'a> {
     fn new(
         index: i32,
-        parent_index: i32,
-        node_data_as: &'a [JxbNodeDataA],
         node_data_bs: &'a [JxbNodeDataB],
         utf8_strings: &'a BTreeMap<i32, String>,
         utf16_strings: &'a BTreeMap<i32, String>,
     ) -> std::io::Result<JxbNode<'a>> {
-        let a = &node_data_as[index as usize];
         let b = &node_data_bs[index as usize];
-        if a.parent_index != parent_index {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Incorrect parent_index on node {:#X}! Expected {:#X}, value on node {:#X}",
-                    index, parent_index, a.parent_index
-                ),
-            ));
-        }
         Ok(JxbNode {
             node_type: get_string(b.node_type_offset, utf8_strings)?,
             tags: b
@@ -263,16 +291,9 @@ impl<'a> JxbNode<'a> {
                 })
                 .collect::<std::io::Result<_>>()?,
             text: get_string(b.text_offset, utf16_strings)?,
-            children: (b.first_child_index..b.first_child_index + b.child_count)
+            children: (b.children_start_index..b.children_start_index + b.child_count)
                 .map(|child_index| {
-                    JxbNode::new(
-                        child_index,
-                        index,
-                        node_data_as,
-                        node_data_bs,
-                        utf8_strings,
-                        utf16_strings,
-                    )
+                    JxbNode::new(child_index, node_data_bs, utf8_strings, utf16_strings)
                 })
                 .collect::<std::io::Result<_>>()?,
         })

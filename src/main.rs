@@ -39,6 +39,8 @@ enum Commands {
     ExtractJxb {
         /// The input file.
         in_path: PathBuf,
+        /// The output file.
+        out_path: PathBuf,
     },
 }
 
@@ -88,8 +90,8 @@ async fn main() {
             let elapsed = now.elapsed();
             eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
-        Commands::ExtractJxb { in_path } => {
-            jxb::check_file(in_path)
+        Commands::ExtractJxb { in_path, out_path } => {
+            jxb::extract_jxb_file(in_path, out_path)
                 .await
                 .expect("Error extracting jxb file!");
         }

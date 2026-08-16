@@ -5,23 +5,24 @@ use std::{
 };
 
 use binrw::{
-    BinRead, binread,
+    BinRead, BinResult, binread,
     helpers::{args_iter, until_exclusive, until_with},
 };
 use indexmap::IndexMap;
-use tokio::{fs::File, io::AsyncReadExt};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncWriteExt},
+};
 
-pub async fn check_file(in_path: &Path) -> std::io::Result<()> {
+pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
     let mut reader = File::open(in_path).await?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer).await?;
     let mut cursor = Cursor::new(buffer);
-
-    let jxb = Jxb::read(&mut cursor).expect("Jxb parsing failure");
+    let jxb = Jxb::read(&mut cursor)?;
     let node = jxb.root_node()?;
-    eprintln!("Parsed {}", in_path.display());
-    println!("{node:#X?}");
-
+    let mut writer = File::create(out_path).await?;
+    writer.write_all(format!("{node:#X?}").as_bytes()).await?;
     Ok(())
 }
 

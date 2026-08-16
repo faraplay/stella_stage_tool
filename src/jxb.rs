@@ -47,15 +47,12 @@ struct Jxb {
     #[br(temp)]
     #[br(map(|relative_offset: i32| start_pos + relative_offset))]
     key_string_offset_region_pos: i32,
-    unknown_0x18: u32,
+    #[br(magic = b"\0\0\0\0")]
     #[br(temp)]
     #[br(map(|relative_offset: i32| start_pos + relative_offset))]
     string_region_pos: i32,
-    unknown_0x20: u32,
-    unknown_0x24: u32,
-    unknown_0x28: u32,
-    unknown_0x2c: u32,
 
+    #[br(magic = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")] // 0x10 zero bytes
     #[br(args { count: node_count as usize })]
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == b_region_pos as u64),

@@ -12,7 +12,7 @@ pub async fn check_file(in_path: &Path) -> std::io::Result<()> {
     let mut cursor = Cursor::new(buffer);
 
     let jxb = Jxb::read(&mut cursor).expect("Jxb parsing failure");
-    let node = jxb.root_node();
+    let node = jxb.root_node()?;
     eprintln!("Parsed {}", in_path.display());
     println!("{node:#X?}");
 
@@ -69,7 +69,7 @@ struct Jxb {
             .chain(jxb_b.tags.iter().map(|tag|tag.utf8_offset()))
         )
         .max()
-        .unwrap()
+        .unwrap_or(0)
         )]
     d_ascii_max_offset: i32,
     #[br(parse_with = until_with(
@@ -81,7 +81,7 @@ struct Jxb {
     ))]
     d_utf8s: BTreeMap<i32, String>,
     #[br(temp)]
-    #[br(calc = bs.iter().map(|jxb_b| jxb_b.d_utf16_offset).max().unwrap())]
+    #[br(calc = bs.iter().map(|jxb_b| jxb_b.d_utf16_offset).max().unwrap_or(0))]
     d_utf16_max_offset: i32,
     #[br(parse_with = until_with(
         |(offset, _): &(i32, String)| *offset >= d_utf16_max_offset,
@@ -188,7 +188,7 @@ struct JxbDUtf16 {
 }
 
 impl<'a> Jxb {
-    fn root_node(&'a self) -> JxbNode<'a> {
+    fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
         JxbNode::new(0, &self.record_as, &self.bs, &self.d_utf8s, &self.d_utf16s)
     }
 }
@@ -208,17 +208,27 @@ impl<'a> JxbNode<'a> {
         bs: &'a [JxbB],
         utf8_strings: &'a BTreeMap<i32, String>,
         utf16_strings: &'a BTreeMap<i32, String>,
-    ) -> JxbNode<'a> {
+    ) -> std::io::Result<JxbNode<'a>> {
         let a = &record_as[index as usize];
         let b = &bs[index as usize];
-        JxbNode {
-            node_type: utf8_strings.get(&b.node_type_utf8_offset).unwrap(),
-            text: utf16_strings.get(&b.d_utf16_offset).unwrap(),
-            tags: b.tags.iter().map(|b_tag| JxbTag::new(b_tag, utf8_strings)).collect(),
+        Ok(JxbNode {
+            node_type: utf8_strings.get(&b.node_type_utf8_offset).ok_or_else(
+                || std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Could not find UTF8 string at {:#X}", b.node_type_utf8_offset)
+                )
+            )?,
+            text: utf16_strings.get(&b.d_utf16_offset).ok_or_else(
+                || std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Could not find UTF16 string at {:#X}", b.d_utf16_offset)
+                )
+            )?,
+            tags: b.tags.iter().map(|b_tag| JxbTag::new(b_tag, utf8_strings)).collect::<std::io::Result<_>>()?,
             children: (b.first_child_index..b.first_child_index + b.child_count).map(
                 |index| JxbNode::new(index, record_as, bs, utf8_strings, utf16_strings)
-            ).collect()
-        }
+            ).collect::<std::io::Result<_>>()?
+        })
     }
 }
 
@@ -247,28 +257,51 @@ enum JxbValue<'a> {
 }
 
 impl<'a> JxbTag<'a> {
-    fn new(b_tag: &JxbBTag, strings: &'a BTreeMap<i32, String>) -> JxbTag<'a> {
+    fn new(b_tag: &JxbBTag, strings: &'a BTreeMap<i32, String>) -> std::io::Result<JxbTag<'a>> {
         match b_tag {
             JxbBTag::Type1 { type_utf8_offset, type_id, value } => 
-                JxbTag::ValueTag {
-                    key: strings.get(type_utf8_offset).unwrap(),
+                Ok(JxbTag::ValueTag {
+                    key: strings.get(type_utf8_offset).ok_or_else(
+                        || std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Could not find UTF8 string at {:#X}", type_utf8_offset)
+                        )
+                    )?,
                     value: match type_id {
-                        3 => JxbValue::Text(strings.get(value).unwrap()),
+                        3 => JxbValue::Text(strings.get(value).ok_or_else(
+                        || std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Could not find UTF8 string at {:#X}", value)
+                            )
+                        )?),
                         4 => JxbValue::Float(f32::from_le_bytes(value.to_le_bytes())),
                         5 => JxbValue::Int(*value),
                         6 => JxbValue::Bool(match value {
                             0 => false,
                             1 => true,
-                            _ => panic!("Invalid bool"),
+                            _ => return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("Invalid boolean value {:#X}!", value)
+                            )),
                         }),
                         _ => JxbValue::Other { type_id: *type_id, value: *value }
                     }
-                },
+                }),
             JxbBTag::Type3 { type_utf8_offset, value_utf8_offset } => 
-            JxbTag::TextTag { 
-                    key: strings.get(type_utf8_offset).unwrap(),
-                    value: strings.get(value_utf8_offset).unwrap()
-                },
+                Ok(JxbTag::TextTag { 
+                    key: strings.get(type_utf8_offset).ok_or_else(
+                        || std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Could not find UTF8 string at {:#X}", type_utf8_offset)
+                        )
+                    )?,
+                    value: strings.get(value_utf8_offset).ok_or_else(
+                        || std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Could not find UTF8 string at {:#X}", value_utf8_offset)
+                        )
+                    )?,
+                }),
         }
     }
 }

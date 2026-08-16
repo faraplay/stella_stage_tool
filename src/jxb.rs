@@ -1,8 +1,9 @@
-use std::{collections::BTreeMap, io::Cursor, path::Path};
+use std::{collections::BTreeMap, io::Cursor, path::Path, string};
 
 use binrw::{
     BinRead, binread, helpers::{args_iter, until_exclusive, until_with},
 };
+use indexmap::IndexMap;
 use tokio::{fs::File, io::AsyncReadExt};
 
 pub async fn check_file(in_path: &Path) -> std::io::Result<()> {
@@ -190,7 +191,7 @@ impl<'a> Jxb {
 struct JxbNode<'a> {
     node_type: &'a str,
     text: &'a str,
-    tags: Vec<JxbTag<'a>>,
+    tags: IndexMap<&'a str, JxbValue<'a>>,
     children: Vec<JxbNode<'a>>,
 }
 
@@ -205,30 +206,20 @@ impl<'a> JxbNode<'a> {
         let a = &record_as[index as usize];
         let b = &bs[index as usize];
         Ok(JxbNode {
-            node_type: utf8_strings.get(&b.node_type_utf8_offset).ok_or_else(
-                || std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Could not find UTF8 string at {:#X}", b.node_type_utf8_offset)
-                )
-            )?,
-            text: utf16_strings.get(&b.d_utf16_offset).ok_or_else(
-                || std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Could not find UTF16 string at {:#X}", b.d_utf16_offset)
-                )
-            )?,
-            tags: b.tags.iter().map(|b_tag| JxbTag::new(b_tag, utf8_strings)).collect::<std::io::Result<_>>()?,
+            node_type: get_string(b.node_type_utf8_offset, utf8_strings)?,
+            text: get_string(b.d_utf16_offset, utf16_strings)?,
+            tags: b.tags
+                .iter()
+                .map(|b_tag| Ok((
+                    get_string(b_tag.type_utf8_offset, utf8_strings)?,
+                    JxbValue::new(b_tag, utf8_strings)?
+                )))
+                .collect::<std::io::Result<_>>()?,
             children: (b.first_child_index..b.first_child_index + b.child_count).map(
                 |index| JxbNode::new(index, record_as, bs, utf8_strings, utf16_strings)
             ).collect::<std::io::Result<_>>()?
         })
     }
-}
-
-#[derive(Debug)]
-struct JxbTag<'a> {
-    key: &'a str,
-    value: JxbValue<'a>
 }
 
 #[derive(Debug)]
@@ -243,34 +234,31 @@ enum JxbValue<'a> {
     }
 }
 
-impl<'a> JxbTag<'a> {
-    fn new(b_tag: &JxbBTag, strings: &'a BTreeMap<i32, String>) -> std::io::Result<JxbTag<'a>> {
-        Ok(JxbTag {
-            key: strings.get(&b_tag.type_utf8_offset).ok_or_else(
-                || std::io::Error::new(
+fn get_string(offset: i32, map: &BTreeMap<i32, String>) -> std::io::Result<&str> {
+    match map.get(&offset) {
+        Some(value) => Ok(value),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Could not find string at {:#X}", offset)
+        ))
+    }
+}
+
+impl<'a> JxbValue<'a> {
+    fn new(b_tag: &JxbBTag, strings: &'a BTreeMap<i32, String>) -> std::io::Result<JxbValue<'a>> {
+        Ok(match b_tag.type_id {
+            3 => JxbValue::Text(get_string(b_tag.value, strings)?),
+            4 => JxbValue::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
+            5 => JxbValue::Int(b_tag.value),
+            6 => JxbValue::Bool(match b_tag.value {
+                0 => false,
+                1 => true,
+                _ => return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Could not find UTF8 string at {:#X}", b_tag.type_utf8_offset)
-                )
-            )?,
-            value: match b_tag.type_id {
-                3 => JxbValue::Text(strings.get(&b_tag.value).ok_or_else(
-                || std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Could not find UTF8 string at {:#X}", b_tag.value)
-                    )
-                )?),
-                4 => JxbValue::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
-                5 => JxbValue::Int(b_tag.value),
-                6 => JxbValue::Bool(match b_tag.value {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Invalid boolean value {:#X}!", b_tag.value)
-                    )),
-                }),
-                _ => JxbValue::Other { type_id: b_tag.type_id, value: b_tag.value }
-            }
+                    format!("Invalid boolean value {:#X}!", b_tag.value)
+                )),
+            }),
+            _ => JxbValue::Other { type_id: b_tag.type_id, value: b_tag.value }
         })
     }
 }

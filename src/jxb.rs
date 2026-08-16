@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io::Cursor, path::Path, string};
+use std::{collections::{BTreeMap, HashSet}, io::Cursor, path::Path};
 
 use binrw::{
     BinRead, binread, helpers::{args_iter, until_exclusive, until_with},
@@ -129,6 +129,10 @@ struct JxbB {
         3 => !tags.is_empty(),
         _ => false,
     }))]
+    #[br(assert({
+        let mut keys = HashSet::new();
+        tags.iter().all(|tag| keys.insert(tag.key_utf8_offset))
+    }))]
     tags: Vec<JxbBTag>,
 }
 
@@ -137,7 +141,7 @@ struct JxbB {
 #[br(import(tag_version: u16))]
 #[derive(Debug)]
 struct JxbBTag {
-    type_utf8_offset: i32,
+    key_utf8_offset: i32,
     #[br(if(tag_version != 3, 3))]
     type_id: u32,
     value: i32,
@@ -146,9 +150,9 @@ struct JxbBTag {
 impl JxbBTag {
     fn utf8_offset(&self) -> i32 {
         if self.type_id == 3 {
-            std::cmp::max(self.type_utf8_offset, self.value)
+            std::cmp::max(self.key_utf8_offset, self.value)
         } else {
-            self.type_utf8_offset
+            self.key_utf8_offset
         }
     }
 }
@@ -211,7 +215,7 @@ impl<'a> JxbNode<'a> {
             tags: b.tags
                 .iter()
                 .map(|b_tag| Ok((
-                    get_string(b_tag.type_utf8_offset, utf8_strings)?,
+                    get_string(b_tag.key_utf8_offset, utf8_strings)?,
                     JxbValue::new(b_tag, utf8_strings)?
                 )))
                 .collect::<std::io::Result<_>>()?,

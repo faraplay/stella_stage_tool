@@ -58,7 +58,19 @@ async fn extract_directory_inner(
             };
             if extension.to_ascii_lowercase() == "jxb" {
                 join_set.spawn(async move {
-                    match extract_jxb_file(&new_in_path, &new_out_path.with_extension("txt")).await
+                    match extract_jxb_file(&new_in_path, &new_out_path.with_added_extension("txt"))
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                        }
+                    }
+                });
+            } else if extension.to_ascii_lowercase() == "jxk" {
+                join_set.spawn(async move {
+                    match extract_jxk_file(&new_in_path, &new_out_path.with_added_extension("txt"))
+                        .await
                     {
                         Ok(_) => {}
                         Err(error) => {
@@ -72,6 +84,18 @@ async fn extract_directory_inner(
     Ok(())
 }
 
+pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+    let mut reader = File::open(in_path).await?;
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer).await?;
+    let mut cursor = Cursor::new(buffer);
+    let jxk = Jxk::read(&mut cursor)?;
+    let node = jxk.jxb.root_node()?;
+    let mut writer = File::create(out_path).await?;
+    writer.write_all(format!("{node:#X?}").as_bytes()).await?;
+    Ok(())
+}
+
 pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
     let mut reader = File::open(in_path).await?;
     let mut buffer = Vec::new();
@@ -82,6 +106,20 @@ pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
     let mut writer = File::create(out_path).await?;
     writer.write_all(format!("{node:#X?}").as_bytes()).await?;
     Ok(())
+}
+
+#[binread]
+#[br(little)]
+#[derive(Debug)]
+struct Jxk {
+    #[br(magic = b"JXK\0")]
+    #[br(temp)]
+    file_count: i32,
+    #[br(magic = b"\0\0\0\0")]
+    #[br(args { count: file_count as usize })]
+    file_metadata: Vec<(i32, i32, i32)>,
+    #[br(align_before = 0x10)]
+    jxb: Jxb,
 }
 
 #[binread]

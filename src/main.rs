@@ -37,6 +37,9 @@ enum Commands {
         out_path: PathBuf,
     },
     ExtractJxb {
+        /// Extract all .jxb files in the specified directory instead.
+        #[arg(short)]
+        recursive: bool,
         /// The input file.
         in_path: PathBuf,
         /// The output file.
@@ -90,10 +93,25 @@ async fn main() {
             let elapsed = now.elapsed();
             eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
-        Commands::ExtractJxb { in_path, out_path } => {
-            jxb::extract_jxb_file(in_path, out_path)
-                .await
-                .expect("Error extracting jxb file!");
+        Commands::ExtractJxb {
+            recursive,
+            in_path,
+            out_path,
+        } => {
+            let now = Instant::now();
+            if *recursive {
+                jxb::extract_directory(in_path, out_path)
+                    .await
+                    .expect("Error extracting jxb file!");
+                eprintln!("Extracted files in directory.")
+            } else {
+                jxb::extract_jxb_file(in_path, out_path)
+                    .await
+                    .expect("Error extracting jxb file!");
+                eprintln!("Extracted file.")
+            }
+            let elapsed = now.elapsed();
+            eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
     }
 }

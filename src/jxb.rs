@@ -10,9 +10,67 @@ use binrw::{
 };
 use indexmap::IndexMap;
 use tokio::{
-    fs::File,
+    fs::{File, create_dir, metadata, read_dir},
     io::{AsyncReadExt, AsyncWriteExt},
+    task::JoinSet,
 };
+
+/// Extract all files in a directory. Searches the directory recursively.
+pub async fn extract_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+    let mut set = JoinSet::new();
+    extract_directory_inner(in_path, out_path, &mut set).await?;
+    set.join_all().await;
+    Ok(())
+}
+
+async fn extract_directory_inner(
+    in_path: &Path,
+    out_path: &Path,
+    join_set: &mut JoinSet<()>,
+) -> std::io::Result<()> {
+    // try to create output directory
+    let create_result = create_dir(out_path).await;
+    match create_result {
+        Ok(_) => {}
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                Err(error)?;
+            }
+        }
+    }
+
+    // recurse over entries
+    let mut in_dir = read_dir(in_path).await?;
+    while let Some(entry) = in_dir.next_entry().await? {
+        let new_in_path = entry.path();
+        let new_out_path = out_path.join(new_in_path.file_name().unwrap());
+        let entry_metadata = metadata(&new_in_path).await?;
+        if entry_metadata.is_dir() {
+            Box::pin(extract_directory_inner(
+                &new_in_path,
+                &new_out_path,
+                join_set,
+            ))
+            .await?;
+        } else if entry_metadata.is_file() {
+            let Some(extension) = new_in_path.extension() else {
+                continue;
+            };
+            if extension.to_ascii_lowercase() == "jxb" {
+                join_set.spawn(async move {
+                    match extract_jxb_file(&new_in_path, &new_out_path.with_extension("txt")).await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                        }
+                    }
+                });
+            }
+        }
+    }
+    Ok(())
+}
 
 pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
     let mut reader = File::open(in_path).await?;

@@ -3,6 +3,7 @@ use std::{path::PathBuf, time::Instant};
 use clap::{Parser, Subcommand};
 
 mod crypt;
+mod jxb;
 
 #[derive(Parser)]
 struct Cli {
@@ -34,6 +35,10 @@ enum Commands {
         in_path: PathBuf,
         /// The output file or directory.
         out_path: PathBuf,
+    },
+    ExtractJxb {
+        /// The input file.
+        in_path: PathBuf,
     },
 }
 
@@ -82,6 +87,11 @@ async fn main() {
             }
             let elapsed = now.elapsed();
             eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
+        }
+        Commands::ExtractJxb { in_path } => {
+            jxb::check_file(in_path)
+                .await
+                .expect("Error extracting jxb file!");
         }
     }
 }

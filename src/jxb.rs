@@ -1,7 +1,12 @@
-use std::{collections::{BTreeMap, HashSet}, io::Cursor, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::Cursor,
+    path::Path,
+};
 
 use binrw::{
-    BinRead, binread, helpers::{args_iter, until_exclusive, until_with},
+    BinRead, binread,
+    helpers::{args_iter, until_exclusive, until_with},
 };
 use indexmap::IndexMap;
 use tokio::{fs::File, io::AsyncReadExt};
@@ -28,81 +33,82 @@ pub async fn check_file(in_path: &Path) -> std::io::Result<()> {
 struct Jxb {
     unknown_0x4: u32,
     #[br(temp)]
-    #[br(assert(a_count != 0))]
-    a_count: u32,
+    #[br(assert(node_count != 0))]
+    node_count: u32,
     #[br(temp)]
-    c_count: u32,
+    key_string_count: u32,
     #[br(temp)]
     b_region_offset: i32,
     #[br(temp)]
-    c_region_offset: i32,
+    key_string_offset_region_offset: i32,
     unknown_0x18: u32,
     #[br(temp)]
-    d_region_offset: i32,
+    string_region_offset: i32,
     unknown_0x20: u32,
     unknown_0x24: u32,
     unknown_0x28: u32,
     unknown_0x2c: u32,
 
-    #[br(args { count: a_count as usize })]
+    #[br(args { count: node_count as usize })]
     #[br(assert(reader.stream_position().map_or(false, |pos| pos == b_region_offset as u64)))]
-    record_as: Vec<JxbA>,
+    node_data_as: Vec<JxbNodeDataA>,
 
     #[br(parse_with = args_iter(
-        record_as.iter().map(
-            |record| (b_region_offset + record.b_offset, record.tag_version, record.b_tag_count)
+        node_data_as.iter().map(
+            |a| (b_region_offset + a.b_offset, a.tag_version, a.tag_count)
         )
     ))]
     #[br(align_after = 0x10)]
-    #[br(assert(reader.stream_position().map_or(false, |pos| pos == c_region_offset as u64)))]
-    bs: Vec<JxbB>,
+    #[br(assert(reader.stream_position().map_or(false, |pos| pos == key_string_offset_region_offset as u64)))]
+    node_data_bs: Vec<JxbNodeDataB>,
 
-    #[br(args { count: c_count as usize })]
+    #[br(args { count: key_string_count as usize })]
     #[br(align_after = 0x10)]
-    cs: Vec<u32>,
+    key_string_offsets: Vec<u32>,
 
     #[br(temp)]
-    #[br(calc = bs
+    #[br(calc = node_data_bs
         .iter()
         .flat_map(
-            |jxb_b| 
-            std::iter::once(jxb_b.node_type_utf8_offset)
-            .chain(jxb_b.tags.iter().map(|tag|tag.utf8_offset()))
+            |b|
+            std::iter::once(b.node_type_offset)
+            .chain(b.tags.iter().map(|tag|tag.utf8_offset()))
         )
         .max()
         .unwrap_or(0)
         )]
-    d_ascii_max_offset: i32,
+    utf8_max_offset: i32,
     #[br(parse_with = until_with(
-        |(offset, _): &(i32, String)| *offset >= d_ascii_max_offset,
+        |(offset, _): &(i32, String)| *offset >= utf8_max_offset,
         |reader, options, _: ()| {
-            let jxb_d = JxbDUtf8::read_options(reader, options, ())?;
-            Ok((jxb_d.offset - d_region_offset, jxb_d.text))
+            let string = JxbUtf8String::read_options(reader, options, ())?;
+            Ok((string.offset - string_region_offset, string.text))
         }
     ))]
-    d_utf8s: BTreeMap<i32, String>,
+    utf8_strings: BTreeMap<i32, String>,
+
     #[br(temp)]
-    #[br(calc = bs.iter().map(|jxb_b| jxb_b.d_utf16_offset).max().unwrap_or(0))]
-    d_utf16_max_offset: i32,
+    #[br(calc = node_data_bs.iter().map(|jxb_b| jxb_b.text_offset).max().unwrap_or(0))]
+    utf16_max_offset: i32,
     #[br(parse_with = until_with(
-        |(offset, _): &(i32, String)| *offset >= d_utf16_max_offset,
+        |(offset, _): &(i32, String)| *offset >= utf16_max_offset,
         |reader, options, _: ()| {
-            let jxb_d = JxbDUtf16::read_options(reader, options, ())?;
-            Ok((jxb_d.offset - d_region_offset, jxb_d.text))
+            let string = JxbUtf16String::read_options(reader, options, ())?;
+            Ok((string.offset - string_region_offset, string.text))
         }
     ))]
-    d_utf16s: BTreeMap<i32, String>,
+    utf16_strings: BTreeMap<i32, String>,
 }
 
 #[binread]
 #[br(little)]
 #[derive(Debug)]
-struct JxbA {
+struct JxbNodeDataA {
     #[br(temp)]
     #[br(assert(unknown_0x0 == 3))]
     unknown_0x0: u16,
     tag_version: u16,
-    b_tag_count: u32,
+    tag_count: u32,
     b_offset: i32,
     parent_index: i32,
 }
@@ -110,18 +116,19 @@ struct JxbA {
 #[binread]
 #[br(little)]
 #[br(stream = reader)]
-#[br(import(offset: i32, tag_version: u16, extra_count: u32))]
+#[br(import(expected_offset: i32, tag_version: u16, extra_count: u32))]
 #[br(pre_assert(
-    reader.stream_position().map_or(false, |pos| pos == offset as u64),
+    reader.stream_position().map_or(false, |pos| pos == expected_offset as u64),
     "incorrect stream position, expected {:X}",
-    offset
+    expected_offset
 ))]
 #[derive(Debug)]
-struct JxbB {
-    node_type_utf8_offset: i32,
+struct JxbNodeDataB {
+    node_type_offset: i32,
     first_child_index: i32,
     child_count: i32,
-    d_utf16_offset: i32,
+    text_offset: i32,
+
     #[br(args { count: extra_count as usize, inner: (tag_version,) })]
     #[br(assert(match tag_version {
         0 => tags.is_empty(),
@@ -131,28 +138,28 @@ struct JxbB {
     }))]
     #[br(assert({
         let mut keys = HashSet::new();
-        tags.iter().all(|tag| keys.insert(tag.key_utf8_offset))
+        tags.iter().all(|tag| keys.insert(tag.key_offset))
     }))]
-    tags: Vec<JxbBTag>,
+    tags: Vec<JxbTag>,
 }
 
 #[binread]
 #[br(little)]
 #[br(import(tag_version: u16))]
 #[derive(Debug)]
-struct JxbBTag {
-    key_utf8_offset: i32,
+struct JxbTag {
+    key_offset: i32,
     #[br(if(tag_version != 3, 3))]
     type_id: u32,
     value: i32,
 }
 
-impl JxbBTag {
+impl JxbTag {
     fn utf8_offset(&self) -> i32 {
         if self.type_id == 3 {
-            std::cmp::max(self.key_utf8_offset, self.value)
+            std::cmp::max(self.key_offset, self.value)
         } else {
-            self.key_utf8_offset
+            self.key_offset
         }
     }
 }
@@ -161,7 +168,7 @@ impl JxbBTag {
 #[br(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
-struct JxbDUtf8 {
+struct JxbUtf8String {
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     offset: i32,
     #[br(temp)]
@@ -175,7 +182,7 @@ struct JxbDUtf8 {
 #[br(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
-struct JxbDUtf16 {
+struct JxbUtf16String {
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     offset: i32,
     #[br(temp)]
@@ -190,10 +197,10 @@ impl<'a> Jxb {
         JxbNode::new(
             0,
             -1,
-            &self.record_as,
-            &self.bs,
-            &self.d_utf8s,
-            &self.d_utf16s
+            &self.node_data_as,
+            &self.node_data_bs,
+            &self.utf8_strings,
+            &self.utf16_strings,
         )
     }
 }
@@ -201,8 +208,8 @@ impl<'a> Jxb {
 #[derive(Debug)]
 struct JxbNode<'a> {
     node_type: &'a str,
-    text: &'a str,
     tags: IndexMap<&'a str, JxbValue<'a>>,
+    text: &'a str,
     children: Vec<JxbNode<'a>>,
 }
 
@@ -210,37 +217,47 @@ impl<'a> JxbNode<'a> {
     fn new(
         index: i32,
         parent_index: i32,
-        record_as: &'a [JxbA],
-        bs: &'a [JxbB],
+        node_data_as: &'a [JxbNodeDataA],
+        node_data_bs: &'a [JxbNodeDataB],
         utf8_strings: &'a BTreeMap<i32, String>,
         utf16_strings: &'a BTreeMap<i32, String>,
     ) -> std::io::Result<JxbNode<'a>> {
-        let a = &record_as[index as usize];
-        let b = &bs[index as usize];
+        let a = &node_data_as[index as usize];
+        let b = &node_data_bs[index as usize];
         if a.parent_index != parent_index {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "Incorrect parent_index on node {:#X}! Expected {:#X}, value on node {:#X}",
-                    index,
-                    parent_index,
-                    a.parent_index
-                )
+                    index, parent_index, a.parent_index
+                ),
             ));
         }
         Ok(JxbNode {
-            node_type: get_string(b.node_type_utf8_offset, utf8_strings)?,
-            text: get_string(b.d_utf16_offset, utf16_strings)?,
-            tags: b.tags
+            node_type: get_string(b.node_type_offset, utf8_strings)?,
+            tags: b
+                .tags
                 .iter()
-                .map(|b_tag| Ok((
-                    get_string(b_tag.key_utf8_offset, utf8_strings)?,
-                    JxbValue::new(b_tag, utf8_strings)?
-                )))
+                .map(|b_tag| {
+                    Ok((
+                        get_string(b_tag.key_offset, utf8_strings)?,
+                        JxbValue::new(b_tag, utf8_strings)?,
+                    ))
+                })
                 .collect::<std::io::Result<_>>()?,
-            children: (b.first_child_index..b.first_child_index + b.child_count).map(
-                |child_index| JxbNode::new(child_index, index, record_as, bs, utf8_strings, utf16_strings)
-            ).collect::<std::io::Result<_>>()?
+            text: get_string(b.text_offset, utf16_strings)?,
+            children: (b.first_child_index..b.first_child_index + b.child_count)
+                .map(|child_index| {
+                    JxbNode::new(
+                        child_index,
+                        index,
+                        node_data_as,
+                        node_data_bs,
+                        utf8_strings,
+                        utf16_strings,
+                    )
+                })
+                .collect::<std::io::Result<_>>()?,
         })
     }
 }
@@ -251,24 +268,21 @@ enum JxbValue<'a> {
     Float(f32),
     Int(i32),
     Bool(bool),
-    Other {
-        type_id: u32,
-        value: i32,
-    }
+    Other { type_id: u32, value: i32 },
 }
 
-fn get_string(offset: i32, map: &BTreeMap<i32, String>) -> std::io::Result<&str> {
-    match map.get(&offset) {
+fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&str> {
+    match strings.get(&offset) {
         Some(value) => Ok(value),
         None => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("Could not find string at {:#X}", offset)
-        ))
+            format!("Could not find string at {:#X}", offset),
+        )),
     }
 }
 
 impl<'a> JxbValue<'a> {
-    fn new(b_tag: &JxbBTag, strings: &'a BTreeMap<i32, String>) -> std::io::Result<JxbValue<'a>> {
+    fn new(b_tag: &JxbTag, strings: &'a BTreeMap<i32, String>) -> std::io::Result<JxbValue<'a>> {
         Ok(match b_tag.type_id {
             3 => JxbValue::Text(get_string(b_tag.value, strings)?),
             4 => JxbValue::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
@@ -276,12 +290,17 @@ impl<'a> JxbValue<'a> {
             6 => JxbValue::Bool(match b_tag.value {
                 0 => false,
                 1 => true,
-                _ => return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Invalid boolean value {:#X}!", b_tag.value)
-                )),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid boolean value {:#X}!", b_tag.value),
+                    ));
+                }
             }),
-            _ => JxbValue::Other { type_id: b_tag.type_id, value: b_tag.value }
+            _ => JxbValue::Other {
+                type_id: b_tag.type_id,
+                value: b_tag.value,
+            },
         })
     }
 }

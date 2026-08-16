@@ -260,9 +260,7 @@ struct Jxb {
 #[br(little)]
 #[derive(Debug)]
 struct JxbNodeDataA {
-    #[br(temp)]
-    #[br(assert(unknown_0x0 == 3))]
-    unknown_0x0: u16,
+    #[br(magic = b"\x03\0")]
     tag_version: u16,
     tag_count: u32,
     b_offset: i32,
@@ -286,17 +284,48 @@ struct JxbNodeDataB {
     text_offset: i32,
 
     #[br(args { count: extra_count as usize, inner: (tag_version,) })]
-    #[br(assert(match tag_version {
-        0 => tags.is_empty(),
-        1 => tags.iter().any(|tag| tag.type_id != 3),
-        3 => !tags.is_empty(),
-        _ => false,
-    }))]
-    #[br(assert({
-        let mut keys = HashSet::new();
-        tags.iter().all(|tag| keys.insert(tag.key_offset))
-    }))]
     tags: Vec<JxbTag>,
+
+    #[br(temp)]
+    #[br(try_calc(
+        (||{
+            match tag_version {
+                0 => if !tags.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "tag version is 0 but there are tags present",
+                    ))
+                },
+                1 => if tags.iter().all(|tag| tag.type_id == 3) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "tag version is 1 but all tags present have type_id 3",
+                    ))
+                },
+                3 => if tags.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "tag version is 3 but there are no tags present",
+                    ))
+                },
+                _ => return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown tag version {:#X}", tag_version),
+                )),
+            };
+            let mut key_offsets = HashSet::new();
+            for tag in &tags {
+                if !key_offsets.insert(tag.key_offset) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Duplicate tag key offset {}", tag.key_offset),
+                    ))
+                }
+            }
+            return Ok(());
+        })()
+    ))]
+    assertion1: (),
 }
 
 #[binread]

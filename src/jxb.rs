@@ -109,7 +109,7 @@ struct JxbA {
 #[binread]
 #[br(little)]
 #[br(stream = reader)]
-#[br(import(offset: i32, version: u16, extra_count: u32))]
+#[br(import(offset: i32, tag_version: u16, extra_count: u32))]
 #[br(pre_assert(
     reader.stream_position().map_or(false, |pos| pos == offset as u64),
     "incorrect stream position, expected {:X}",
@@ -121,40 +121,33 @@ struct JxbB {
     first_child_index: i32,
     child_count: i32,
     d_utf16_offset: i32,
-    #[br(args { count: extra_count as usize, inner: (version,) })]
+    #[br(args { count: extra_count as usize, inner: (tag_version,) })]
+    #[br(assert(match tag_version {
+        0 => tags.is_empty(),
+        1 => tags.iter().any(|tag| tag.type_id != 3),
+        3 => !tags.is_empty(),
+        _ => false,
+    }))]
     tags: Vec<JxbBTag>,
 }
 
 #[binread]
 #[br(little)]
-#[br(import(version: u16))]
+#[br(import(tag_version: u16))]
 #[derive(Debug)]
-enum JxbBTag {
-    #[br(assert(version == 1))]
-    Type1 {
-        type_utf8_offset: i32,
-        type_id: u32,
-        value: i32,
-    },
-    #[br(assert(version == 3))]
-    Type3 {
-        type_utf8_offset: i32,
-        value_utf8_offset: i32,
-    },
+struct JxbBTag {
+    type_utf8_offset: i32,
+    #[br(if(tag_version != 3, 3))]
+    type_id: u32,
+    value: i32,
 }
 
 impl JxbBTag {
     fn utf8_offset(&self) -> i32 {
-        match self {
-            JxbBTag::Type1 { type_utf8_offset, type_id, value } => {
-                if *type_id == 3 {
-                    std::cmp::max(*type_utf8_offset, *value)
-                } else {
-                    *type_utf8_offset
-                }
-            },
-            JxbBTag::Type3 { type_utf8_offset, value_utf8_offset } => 
-                std::cmp::max(*type_utf8_offset, *value_utf8_offset),
+        if self.type_id == 3 {
+            std::cmp::max(self.type_utf8_offset, self.value)
+        } else {
+            self.type_utf8_offset
         }
     }
 }
@@ -233,15 +226,9 @@ impl<'a> JxbNode<'a> {
 }
 
 #[derive(Debug)]
-enum JxbTag<'a> {
-    TextTag {
-        key: &'a str,
-        value: &'a str,
-    },
-    ValueTag {
-        key: &'a str,
-        value: JxbValue<'a>
-    }
+struct JxbTag<'a> {
+    key: &'a str,
+    value: JxbValue<'a>
 }
 
 #[derive(Debug)]
@@ -258,50 +245,32 @@ enum JxbValue<'a> {
 
 impl<'a> JxbTag<'a> {
     fn new(b_tag: &JxbBTag, strings: &'a BTreeMap<i32, String>) -> std::io::Result<JxbTag<'a>> {
-        match b_tag {
-            JxbBTag::Type1 { type_utf8_offset, type_id, value } => 
-                Ok(JxbTag::ValueTag {
-                    key: strings.get(type_utf8_offset).ok_or_else(
-                        || std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Could not find UTF8 string at {:#X}", type_utf8_offset)
-                        )
-                    )?,
-                    value: match type_id {
-                        3 => JxbValue::Text(strings.get(value).ok_or_else(
-                        || std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Could not find UTF8 string at {:#X}", value)
-                            )
-                        )?),
-                        4 => JxbValue::Float(f32::from_le_bytes(value.to_le_bytes())),
-                        5 => JxbValue::Int(*value),
-                        6 => JxbValue::Bool(match value {
-                            0 => false,
-                            1 => true,
-                            _ => return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("Invalid boolean value {:#X}!", value)
-                            )),
-                        }),
-                        _ => JxbValue::Other { type_id: *type_id, value: *value }
-                    }
+        Ok(JxbTag {
+            key: strings.get(&b_tag.type_utf8_offset).ok_or_else(
+                || std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Could not find UTF8 string at {:#X}", b_tag.type_utf8_offset)
+                )
+            )?,
+            value: match b_tag.type_id {
+                3 => JxbValue::Text(strings.get(&b_tag.value).ok_or_else(
+                || std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Could not find UTF8 string at {:#X}", b_tag.value)
+                    )
+                )?),
+                4 => JxbValue::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
+                5 => JxbValue::Int(b_tag.value),
+                6 => JxbValue::Bool(match b_tag.value {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid boolean value {:#X}!", b_tag.value)
+                    )),
                 }),
-            JxbBTag::Type3 { type_utf8_offset, value_utf8_offset } => 
-                Ok(JxbTag::TextTag { 
-                    key: strings.get(type_utf8_offset).ok_or_else(
-                        || std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Could not find UTF8 string at {:#X}", type_utf8_offset)
-                        )
-                    )?,
-                    value: strings.get(value_utf8_offset).ok_or_else(
-                        || std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("Could not find UTF8 string at {:#X}", value_utf8_offset)
-                        )
-                    )?,
-                }),
-        }
+                _ => JxbValue::Other { type_id: b_tag.type_id, value: b_tag.value }
+            }
+        })
     }
 }

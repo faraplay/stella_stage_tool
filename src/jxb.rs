@@ -315,6 +315,12 @@ struct Jxb {
 
     #[br(temp)]
     #[br(calc = node_data_bs.iter().map(|b| b.text_offset).min().unwrap())]
+    #[br(assert(
+        node_data_bs.iter().all(
+            |b| b.child_count == 0 || b.text_offset == node_text_offset_min
+        ),
+        "Some node has both text content and child nodes!"
+    ))]
     node_text_offset_min: i32,
     #[br(temp)]
     #[br(calc = node_data_bs.iter().map(|b| b.text_offset).max().unwrap())]

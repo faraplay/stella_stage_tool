@@ -2,12 +2,13 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashSet},
     io::Cursor,
+    iter::once,
     path::Path,
 };
 
 use binrw::{
-    BinRead, BinResult, binread,
-    helpers::{args_iter, until_exclusive, until_exclusive_with, until_with},
+    BinRead, BinResult, binread, binwrite,
+    helpers::{args_iter, until, until_exclusive},
 };
 use indexmap::IndexMap;
 use quick_xml::{Writer, events::BytesText};
@@ -16,6 +17,8 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWrite},
     task::JoinSet,
 };
+
+use crate::size::get_size;
 
 /// Extract all files in a directory. Searches the directory recursively.
 pub async fn extract_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
@@ -165,10 +168,10 @@ pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
 #[br(stream = reader)]
 #[derive(Debug)]
 struct Jxk {
-    #[br(magic = b"JXK\0")]
+    #[brw(magic = b"JXK\0")]
     #[br(temp)]
     file_count: i32,
-    #[br(magic = b"\0\0\0\0")]
+    #[brw(magic = b"\0\0\0\0")]
     #[br(args { count: file_count as usize })]
     #[br(assert(
         file_metadatas.windows(2).all(
@@ -206,7 +209,8 @@ struct Jxk {
 }
 
 #[binread]
-#[br(little)]
+#[binwrite]
+#[brw(little)]
 #[derive(Debug)]
 struct FileMetadata {
     node_index: i32,
@@ -215,35 +219,62 @@ struct FileMetadata {
 }
 
 #[binread]
-#[br(little)]
+#[binwrite]
+#[brw(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
 struct Jxb {
-    #[br(align_before = 0x10)]
-    #[br(temp)]
-    #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
+    // some fields have an alignment of 0x10, so we align the whole struct
+    #[brw(align_before = 0x10)]
+    // record stream position at start of read
+    #[br(temp, try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
+    #[bw(ignore)]
     start_pos: i32,
-    #[br(magic = b"JXB\0\x01\x00\x01")]
+
+    #[brw(magic = b"JXB\0\x01\x00\x01")]
     #[br(assert(uses_utf16 == 1 || uses_utf16 == 2))]
     uses_utf16: u8,
     #[br(temp)]
     #[br(assert(node_count != 0))]
+    #[bw(calc(node_data_bs.len() as u32))]
     node_count: u32,
     #[br(temp)]
+    #[bw(calc(key_string_offsets.len() as u32))]
     key_string_count: u32,
+
+    // offsets
     #[br(temp)]
-    #[br(map(|offset: i32| start_pos + offset))]
+    #[bw(calc(
+        (0x30 + get_size(node_data_as))
+        .next_multiple_of(0x10) as i32
+    ))]
+    b_region_offset: i32,
+    #[br(temp, calc(start_pos + b_region_offset))]
+    #[bw(ignore)]
     b_region_pos: i32,
+
     #[br(temp)]
-    #[br(map(|relative_offset: i32| start_pos + relative_offset))]
+    #[bw(calc(
+        (b_region_offset as usize + get_size(node_data_bs))
+        .next_multiple_of(0x10) as i32
+    ))]
+    key_string_offset_region_offset: i32,
+    #[br(temp, calc(start_pos + key_string_offset_region_offset))]
+    #[bw(ignore)]
     key_string_offset_region_pos: i32,
-    #[br(magic = b"\0\0\0\0")]
+
+    #[brw(magic = b"\0\0\0\0")]
     #[br(temp)]
-    #[br(map(|relative_offset: i32| start_pos + relative_offset))]
+    #[bw(calc(
+        (key_string_offset_region_offset as usize + get_size(key_string_offsets))
+        .next_multiple_of(0x10) as i32
+    ))]
+    string_region_offset: i32,
+    #[br(temp, calc(start_pos + string_region_offset))]
+    #[bw(ignore)]
     string_region_pos: i32,
 
-    #[br(magic = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")] // 0x10 zero bytes
-    #[br(temp)]
+    #[brw(magic = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")] // 0x10 zero bytes
     #[br(args { count: node_count as usize })]
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == b_region_pos as u64),
@@ -259,9 +290,8 @@ struct Jxb {
     ))]
     node_data_bs: Vec<JxbNodeDataB>,
 
-    #[br(temp)]
-    #[br(align_after = 0x10)]
-    #[br(try_calc(
+    #[brw(align_after = 0x10)]
+    #[br(temp, try_calc(
         {
             let mut child_index = 1;
             node_data_bs.iter().enumerate().map(|(parent_index, b)| {
@@ -304,10 +334,11 @@ struct Jxb {
         "incorrect stream position for key_string_offset_region_pos, expected {:X}",
         key_string_offset_region_pos,
     ))]
+    #[bw(ignore)]
     assertion1: (),
 
     #[br(args { count: key_string_count as usize })]
-    #[br(align_after = 0x10)]
+    #[brw(align_after = 0x10)]
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == string_region_pos as u64),
         "incorrect stream position for string_region_pos, expected {:X}",
@@ -321,60 +352,66 @@ struct Jxb {
     ))]
     key_string_offsets: Vec<i32>,
 
-    #[br(temp)]
-    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).min().unwrap())]
+    #[br(temp, calc(node_data_bs.iter().map(|b| b.text_offset).min().unwrap()))]
     #[br(assert(
         node_data_bs.iter().all(
             |b| b.child_count == 0 || b.text_offset == node_text_offset_min
         ),
         "Some node has both text content and child nodes!"
     ))]
+    #[bw(ignore)]
     node_text_offset_min: i32,
-    #[br(temp)]
-    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).max().unwrap())]
+    #[br(temp, calc(node_data_bs.iter().map(|b| b.text_offset).max().unwrap()))]
     #[br(assert(
         if uses_utf16 == 1 { node_text_offset_min == node_text_offset_max } else { true }
     ))]
+    #[bw(ignore)]
     node_text_offset_max: i32,
 
-    #[br(parse_with = until_exclusive_with(
-        |(_, text): &(i32, String)| text.is_empty(),
-        |reader, options, _: ()| {
-            let string = JxbUtf8String::read_options(reader, options, ())?;
-            Ok((string.pos - string_region_pos, string.text))
-        }
+    #[br(temp)]
+    #[br(parse_with = until_exclusive(
+        |string: &JxbUtf8String| string.utf8_values.len() == 1 // empty string is 1 byte
     ))]
     #[br(pad_after(if uses_utf16 == 1 { 0 } else { -1 }))]
+    #[bw(calc(utf8_strings.iter().map(
+        |(&key, text)| JxbUtf8String{ pos: key, utf8_values: text.bytes().chain(once(0)).collect() }
+    ).collect()))]
+    utf8_strings_vec: Vec<JxbUtf8String>,
+    #[br(try_calc(utf8_strings_vec.into_iter().map(|string| Ok((
+        string.pos - string_region_pos,
+        str::from_utf8(&string.utf8_values[..string.utf8_values.len() - 1])?.to_string()
+    ))).collect::<Result<_,std::str::Utf8Error>>()))]
+    #[bw(ignore)]
     utf8_strings: BTreeMap<i32, String>,
 
-    #[br(if(
-        uses_utf16 == 2,
-        BTreeMap::from_iter(
-            std::iter::once(
-                (node_text_offset_max, String::new())
-            )
-        ),
+    #[br(temp)]
+    #[br(if(uses_utf16 == 2, vec![JxbUtf16String{ pos: string_region_pos + node_text_offset_min, utf16_values: vec![0] }]))]
+    #[br(parse_with = until(
+        |string: &JxbUtf16String| string.pos >= string_region_pos + node_text_offset_max
     ))]
-    #[br(parse_with = until_with(
-        |(offset, _): &(i32, String)| *offset >= node_text_offset_max,
-        |reader, options, _: ()| {
-            let string = JxbUtf16String::read_options(reader, options, ())?;
-            Ok((string.pos - string_region_pos, string.text))
-        }
-    ))]
+    #[bw(calc(utf8_strings.iter().map(
+        |(&key, text)| JxbUtf16String{ pos: key, utf16_values: text.encode_utf16().chain(once(0)).collect() }
+    ).collect()))]
+    utf16_strings_vec: Vec<JxbUtf16String>,
+    #[br(try_calc(utf16_strings_vec.into_iter().map(|string| Ok((
+        string.pos - string_region_pos,
+        String::from_utf16(&string.utf16_values[..string.utf16_values.len() - 1])?
+    ))).collect::<Result<_,std::string::FromUtf16Error>>()))]
     #[br(assert(
         utf16_strings.first_entry().is_none_or(|entry|entry.get().is_empty()),
         "the first utf16 string is not the empty string, it is {}",
         utf16_strings.first_key_value().unwrap().1,
     ))]
+    #[bw(ignore)]
     utf16_strings: BTreeMap<i32, String>,
 }
 
 #[binread]
-#[br(little)]
+#[binwrite]
+#[brw(little)]
 #[derive(Debug)]
 struct JxbNodeDataA {
-    #[br(magic = b"\x03\0")]
+    #[brw(magic = b"\x03\0")]
     tags_type_id: u16,
     tag_count: u32,
     b_offset: i32,
@@ -382,9 +419,10 @@ struct JxbNodeDataA {
 }
 
 #[binread]
-#[br(little)]
+#[binwrite]
+#[brw(little)]
 #[br(stream = reader)]
-#[br(import(expected_offset: i32, tags_type_id: u16, extra_count: u32))]
+#[br(import(expected_offset: i32, tags_type_id: u16, tag_count: u32))]
 #[br(pre_assert(
     reader.stream_position().map_or(false, |pos| pos == expected_offset as u64),
     "incorrect stream position for NodeDataB item, expected {:X}",
@@ -397,11 +435,19 @@ struct JxbNodeDataB {
     child_count: i32,
     text_offset: i32,
 
-    #[br(args { count: extra_count as usize, inner: (tags_type_id,) })]
+    #[br(args { count: tag_count as usize, inner: (tags_type_id,) })]
+    #[bw(args (
+        if tags.is_empty() {
+            0
+        } else if tags.windows(2).all(|window| window[0].type_id == window[1].type_id) {
+            tags[0].type_id as u16
+        } else {
+            1
+        }
+    ))]
     tags: Vec<JxbTag>,
 
-    #[br(temp)]
-    #[br(try_calc(
+    #[br(temp, try_calc(
         (||{
             match tags_type_id {
                 0 => if !tags.is_empty() {
@@ -435,12 +481,14 @@ struct JxbNodeDataB {
             return Ok(());
         })()
     ))]
+    #[bw(ignore)]
     assertion1: (),
 }
 
 #[binread]
-#[br(little)]
-#[br(import(tags_type_id: u16))]
+#[binwrite]
+#[brw(little)]
+#[brw(import(tags_type_id: u16))]
 #[derive(Debug)]
 struct JxbTag {
     key_offset: i32,
@@ -450,31 +498,33 @@ struct JxbTag {
 }
 
 #[binread]
-#[br(little)]
+#[binwrite]
+#[brw(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
 struct JxbUtf8String {
+    // store current stream position when reading starts
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
+    #[bw(ignore)]
     pos: i32,
-    #[br(temp)]
-    #[br(parse_with = until_exclusive(|&value| value == 0))]
+
+    #[br(parse_with = until(|&value| value == 0))]
     utf8_values: Vec<u8>,
-    #[br(try_calc(String::from_utf8(utf8_values)))]
-    text: String,
 }
 
 #[binread]
-#[br(little)]
-#[br(stream = reader)]
+#[binwrite]
+#[brw(little)]
+#[brw(stream = reader)]
 #[derive(Debug)]
 struct JxbUtf16String {
+    // store current stream position when reading starts
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
+    #[bw(ignore)]
     pos: i32,
-    #[br(temp)]
-    #[br(parse_with = until_exclusive(|&value| value == 0))]
+
+    #[br(parse_with = until(|&value| value == 0))]
     utf16_values: Vec<u16>,
-    #[br(try_calc(String::from_utf16(&utf16_values)))]
-    text: String,
 }
 
 impl<'a> Jxb {

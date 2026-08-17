@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod crypt;
 mod extract;
+mod size;
 
 #[derive(Parser)]
 struct Cli {

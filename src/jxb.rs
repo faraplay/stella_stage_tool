@@ -6,7 +6,7 @@ use std::{
 
 use binrw::{
     BinRead, BinResult, binread,
-    helpers::{args_iter, until_exclusive, until_exclusive_with, until_with},
+    helpers::{args_iter, until_eof, until_exclusive, until_exclusive_with, until_with},
 };
 use indexmap::IndexMap;
 use tokio::{
@@ -110,6 +110,7 @@ pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
 
 #[binread]
 #[br(little)]
+#[br(stream = reader)]
 #[derive(Debug)]
 struct Jxk {
     #[br(magic = b"JXK\0")]
@@ -117,9 +118,40 @@ struct Jxk {
     file_count: i32,
     #[br(magic = b"\0\0\0\0")]
     #[br(args { count: file_count as usize })]
-    file_metadata: Vec<(i32, i32, i32)>,
+    file_metadatas: Vec<FileMetadata>,
+
     #[br(align_before = 0x10)]
     jxb: Jxb,
+
+    // check jxb end position
+    #[br(temp)]
+    #[br(if (file_count == 0))]
+    #[br(try)]
+    #[br(assert(
+        other_bytes.is_none(),
+        "Stream is not at end of file after reading jxb!",
+    ))]
+    other_bytes: Option<u8>,
+
+    #[br(align_before = 0x10)]
+    #[br(temp)]
+    #[br(if (file_count > 0))]
+    #[br(try_calc(reader.stream_position()))]
+    #[br(assert(
+        file_count == 0 || end_pos == file_metadatas[0].data_offset as u64,
+        "Unexpected stream position {:#X}",
+        end_pos,
+    ))]
+    end_pos: u64,
+}
+
+#[binread]
+#[br(little)]
+#[derive(Debug)]
+struct FileMetadata {
+    node_index: i32,
+    data_offset: i32,
+    data_size: i32,
 }
 
 #[binread]

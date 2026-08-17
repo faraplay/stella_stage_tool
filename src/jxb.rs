@@ -1,12 +1,12 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, HashSet},
     io::Cursor,
     path::Path,
 };
 
 use binrw::{
     BinRead, BinResult, binread,
-    helpers::{args_iter, until_eof, until_exclusive, until_exclusive_with, until_with},
+    helpers::{args_iter, until_exclusive, until_exclusive_with, until_with},
 };
 use indexmap::IndexMap;
 use tokio::{
@@ -164,6 +164,7 @@ struct Jxb {
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     start_pos: i32,
     #[br(magic = b"JXB\0\x01\x00\x01")]
+    #[br(assert(uses_utf16 == 1 || uses_utf16 == 2))]
     uses_utf16: u8,
     #[br(temp)]
     #[br(assert(node_count != 0))]
@@ -260,6 +261,16 @@ struct Jxb {
     ))]
     key_string_offsets: Vec<i32>,
 
+    #[br(temp)]
+    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).min().unwrap())]
+    node_text_offset_min: i32,
+    #[br(temp)]
+    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).max().unwrap())]
+    #[br(assert(
+        if uses_utf16 == 1 { node_text_offset_min == node_text_offset_max } else { true }
+    ))]
+    node_text_offset_max: i32,
+
     #[br(parse_with = until_exclusive_with(
         |(_, text): &(i32, String)| text.is_empty(),
         |reader, options, _: ()| {
@@ -270,26 +281,16 @@ struct Jxb {
     #[br(pad_after(if uses_utf16 == 1 { 0 } else { -1 }))]
     utf8_strings: BTreeMap<i32, String>,
 
-    #[br(temp)]
-    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).collect())]
-    utf16_offsets: BTreeSet<i32>,
-    #[br(temp)]
-    #[br(calc = *utf16_offsets.last().unwrap())]
-    #[br(assert(
-        (uses_utf16 == 2) || (uses_utf16 == 1 && utf16_offsets.len() == 1)
-    ))]
-    utf16_max_offset: i32,
-
     #[br(if(
         uses_utf16 == 2,
         BTreeMap::from_iter(
             std::iter::once(
-                (utf16_max_offset, String::new())
+                (node_text_offset_max, String::new())
             )
         ),
     ))]
     #[br(parse_with = until_with(
-        |(offset, _): &(i32, String)| *offset >= utf16_max_offset,
+        |(offset, _): &(i32, String)| *offset >= node_text_offset_max,
         |reader, options, _: ()| {
             let string = JxbUtf16String::read_options(reader, options, ())?;
             Ok((string.pos - string_region_pos, string.text))

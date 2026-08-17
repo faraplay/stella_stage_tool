@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashSet},
     io::Cursor,
     path::Path,
@@ -9,9 +10,10 @@ use binrw::{
     helpers::{args_iter, until_exclusive, until_exclusive_with, until_with},
 };
 use indexmap::IndexMap;
+use quick_xml::{Writer, events::BytesText};
 use tokio::{
     fs::{File, create_dir, metadata, read_dir},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWrite},
     task::JoinSet,
 };
 
@@ -58,7 +60,7 @@ async fn extract_directory_inner(
             };
             if extension.to_ascii_lowercase() == "jxb" {
                 join_set.spawn(async move {
-                    match extract_jxb_file(&new_in_path, &new_out_path.with_added_extension("txt"))
+                    match extract_jxb_file(&new_in_path, &new_out_path.with_added_extension("xml"))
                         .await
                     {
                         Ok(_) => {}
@@ -103,10 +105,12 @@ pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
     drop(cursor);
 
     let root_node = jxk.jxb.root_node()?;
-    let mut info_writer = File::create(out_path.join("info.txt")).await?;
-    info_writer
-        .write_all(format!("{root_node:#X?}").as_bytes())
-        .await?;
+    let info_writer = File::create(out_path.join("info.xml")).await?;
+    let mut xml_writer = Writer::new_with_indent(info_writer, b' ', 2);
+    root_node
+        .write_xml(&mut xml_writer)
+        .await
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     drop(root_node);
 
     for metadata in jxk.file_metadatas {
@@ -146,9 +150,13 @@ pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
     reader.read_to_end(&mut buffer).await?;
     let mut cursor = Cursor::new(buffer);
     let jxb = Jxb::read(&mut cursor)?;
-    let node = jxb.root_node()?;
-    let mut writer = File::create(out_path).await?;
-    writer.write_all(format!("{node:#X?}").as_bytes()).await?;
+    let root_node = jxb.root_node()?;
+    let writer = File::create(out_path).await?;
+    let mut xml_writer = Writer::new_with_indent(writer, b' ', 2);
+    root_node
+        .write_xml(&mut xml_writer)
+        .await
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     Ok(())
 }
 
@@ -519,6 +527,39 @@ impl<'a> JxbNode<'a> {
                 .collect::<std::io::Result<_>>()?,
         })
     }
+
+    async fn write_xml<W>(&self, writer: &mut Writer<W>) -> quick_xml::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let element_writer = writer.create_element(self.node_type).with_attributes(
+            self.tags
+                .iter()
+                .map(|(key, value)| (*key, value.to_string())),
+        );
+        if !self.text.is_empty() {
+            element_writer
+                .write_text_content_async(BytesText::new(self.text))
+                .await?;
+            return Ok(());
+        }
+        if !self.children.is_empty() {
+            Box::pin(
+                element_writer.write_inner_content_async::<_, _, quick_xml::Error>(
+                    |writer| async {
+                        for child_node in &self.children {
+                            child_node.write_xml(writer).await?;
+                        }
+                        Ok(writer)
+                    },
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+        element_writer.write_empty_async().await?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -565,5 +606,14 @@ impl<'a> JxbValue<'a> {
                 ));
             }
         })
+    }
+
+    fn to_string(&'a self) -> Cow<'a, str> {
+        match self {
+            JxbValue::Text(text) => Cow::Borrowed(*text),
+            JxbValue::Float(value) => Cow::Owned(value.to_string()),
+            JxbValue::Int(value) => Cow::Owned(value.to_string()),
+            JxbValue::Bool(value) => Cow::Owned(value.to_string()),
+        }
     }
 }

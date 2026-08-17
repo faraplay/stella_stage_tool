@@ -11,7 +11,7 @@ use binrw::{
 use indexmap::IndexMap;
 use tokio::{
     fs::{File, create_dir, metadata, read_dir},
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     task::JoinSet,
 };
 
@@ -69,9 +69,7 @@ async fn extract_directory_inner(
                 });
             } else if extension.to_ascii_lowercase() == "jxk" {
                 join_set.spawn(async move {
-                    match extract_jxk_file(&new_in_path, &new_out_path.with_added_extension("txt"))
-                        .await
-                    {
+                    match extract_jxk_file(&new_in_path, &&new_out_path.with_extension("")).await {
                         Ok(_) => {}
                         Err(error) => {
                             eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
@@ -85,14 +83,60 @@ async fn extract_directory_inner(
 }
 
 pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+    // try to create output directory
+    let create_result = create_dir(out_path).await;
+    match create_result {
+        Ok(_) => {}
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                Err(error)?;
+            }
+        }
+    }
+
     let mut reader = File::open(in_path).await?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer).await?;
+
     let mut cursor = Cursor::new(buffer);
     let jxk = Jxk::read(&mut cursor)?;
-    let node = jxk.jxb.root_node()?;
-    let mut writer = File::create(out_path).await?;
-    writer.write_all(format!("{node:#X?}").as_bytes()).await?;
+    drop(cursor);
+
+    let root_node = jxk.jxb.root_node()?;
+    let mut info_writer = File::create(out_path.join("info.txt")).await?;
+    info_writer
+        .write_all(format!("{root_node:#X?}").as_bytes())
+        .await?;
+    drop(root_node);
+
+    for metadata in jxk.file_metadatas {
+        let node = jxk.jxb.get_node(metadata.node_index)?;
+        if node.node_type != "file" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "jxk file metadata links to non-file node!",
+            )
+            .into());
+        }
+        let JxbValue::Text(file_name) = node.tags.get("name").ok_or(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "File node is missing name tag!",
+        ))?
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "File node has name tag but it is not a string!",
+            )
+            .into());
+        };
+        let mut file_writer = File::create(out_path.join(file_name)).await?;
+        reader
+            .seek(std::io::SeekFrom::Start(metadata.data_offset as u64))
+            .await?;
+        let mut short_reader = reader.take(metadata.data_size as u64);
+        tokio::io::copy(&mut short_reader, &mut file_writer).await?;
+        reader = short_reader.into_inner();
+    }
     Ok(())
 }
 
@@ -412,13 +456,16 @@ struct JxbUtf16String {
 }
 
 impl<'a> Jxb {
-    fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
+    fn get_node(&'a self, index: i32) -> std::io::Result<JxbNode<'a>> {
         JxbNode::new(
-            0,
+            index,
             &self.node_data_bs,
             &self.utf8_strings,
             &self.utf16_strings,
         )
+    }
+    fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
+        self.get_node(0)
     }
 }
 

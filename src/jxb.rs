@@ -1,12 +1,12 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     io::Cursor,
     path::Path,
 };
 
 use binrw::{
     BinRead, BinResult, binread,
-    helpers::{args_iter, until_exclusive, until_with},
+    helpers::{args_iter, until_exclusive, until_exclusive_with, until_with},
 };
 use indexmap::IndexMap;
 use tokio::{
@@ -131,8 +131,8 @@ struct Jxb {
     #[br(temp)]
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     start_pos: i32,
-    #[br(magic = b"JXB\0")]
-    unknown_0x4: u32,
+    #[br(magic = b"JXB\0\x01\x00\x01")]
+    uses_utf16: u8,
     #[br(temp)]
     #[br(assert(node_count != 0))]
     node_count: u32,
@@ -155,7 +155,7 @@ struct Jxb {
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == b_region_pos as u64),
         "incorrect stream position for b_region_pos, expected {:X}",
-        b_region_pos
+        b_region_pos,
     ))]
     node_data_as: Vec<JxbNodeDataA>,
 
@@ -209,7 +209,7 @@ struct Jxb {
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == key_string_offset_region_pos as u64),
         "incorrect stream position for key_string_offset_region_pos, expected {:X}",
-        key_string_offset_region_pos
+        key_string_offset_region_pos,
     ))]
     assertion1: (),
 
@@ -218,40 +218,55 @@ struct Jxb {
     #[br(assert(
         reader.stream_position().map_or(false, |pos| pos == string_region_pos as u64),
         "incorrect stream position for string_region_pos, expected {:X}",
-        string_region_pos
+        string_region_pos,
     ))]
-    key_string_offsets: Vec<u32>,
+    #[br(assert(
+        key_string_offsets.windows(2).all(
+            |window| window[0] < window[1]
+        ),
+        "key string offsets are not in ascending order",
+    ))]
+    key_string_offsets: Vec<i32>,
 
-    #[br(temp)]
-    #[br(calc = node_data_bs
-        .iter()
-        .flat_map(
-            |b|
-            std::iter::once(b.node_type_offset)
-            .chain(b.tags.iter().map(|tag|tag.utf8_offset()))
-        )
-        .max()
-        .unwrap_or(0)
-        )]
-    utf8_max_offset: i32,
-    #[br(parse_with = until_with(
-        |(offset, _): &(i32, String)| *offset >= utf8_max_offset,
+    #[br(parse_with = until_exclusive_with(
+        |(_, text): &(i32, String)| text.is_empty(),
         |reader, options, _: ()| {
             let string = JxbUtf8String::read_options(reader, options, ())?;
             Ok((string.pos - string_region_pos, string.text))
         }
     ))]
+    #[br(pad_after = -1)]
     utf8_strings: BTreeMap<i32, String>,
 
     #[br(temp)]
-    #[br(calc = node_data_bs.iter().map(|jxb_b| jxb_b.text_offset).max().unwrap_or(0))]
+    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).collect())]
+    utf16_offsets: BTreeSet<i32>,
+    #[br(temp)]
+    #[br(calc = *utf16_offsets.last().unwrap())]
+    #[br(assert(
+        (uses_utf16 == 2) || (uses_utf16 == 1 && utf16_offsets.len() == 1)
+    ))]
     utf16_max_offset: i32,
+
+    #[br(if(
+        uses_utf16 == 2,
+        BTreeMap::from_iter(
+            std::iter::once(
+                (utf16_max_offset, String::new())
+            )
+        ),
+    ))]
     #[br(parse_with = until_with(
         |(offset, _): &(i32, String)| *offset >= utf16_max_offset,
         |reader, options, _: ()| {
             let string = JxbUtf16String::read_options(reader, options, ())?;
             Ok((string.pos - string_region_pos, string.text))
         }
+    ))]
+    #[br(assert(
+        utf16_strings.first_entry().is_none_or(|entry|entry.get().is_empty()),
+        "the first utf16 string is not the empty string, it is {}",
+        utf16_strings.first_key_value().unwrap().1,
     ))]
     utf16_strings: BTreeMap<i32, String>,
 }
@@ -274,7 +289,7 @@ struct JxbNodeDataA {
 #[br(pre_assert(
     reader.stream_position().map_or(false, |pos| pos == expected_offset as u64),
     "incorrect stream position for NodeDataB item, expected {:X}",
-    expected_offset
+    expected_offset,
 ))]
 #[derive(Debug)]
 struct JxbNodeDataB {

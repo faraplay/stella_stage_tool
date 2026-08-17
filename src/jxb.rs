@@ -267,7 +267,7 @@ struct Jxb {
             Ok((string.pos - string_region_pos, string.text))
         }
     ))]
-    #[br(pad_after = -1)]
+    #[br(pad_after(if uses_utf16 == 1 { 0 } else { -1 }))]
     utf8_strings: BTreeMap<i32, String>,
 
     #[br(temp)]

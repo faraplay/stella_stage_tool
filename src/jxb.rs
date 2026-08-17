@@ -162,6 +162,14 @@ struct Jxk {
     file_count: i32,
     #[br(magic = b"\0\0\0\0")]
     #[br(args { count: file_count as usize })]
+    #[br(assert(
+        file_metadatas.windows(2).all(
+            |window|
+            (window[0].data_offset as u32 + window[0].data_size as u32).next_multiple_of(0x10)
+            == window[1].data_offset as u32
+        ),
+        "File metadata table has an unexpected offset!"
+    ))]
     file_metadatas: Vec<FileMetadata>,
 
     #[br(align_before = 0x10)]

@@ -3,7 +3,7 @@ use std::{path::PathBuf, time::Instant};
 use clap::{Parser, Subcommand};
 
 mod crypt;
-mod jxb;
+mod extract;
 
 #[derive(Parser)]
 struct Cli {
@@ -36,8 +36,11 @@ enum Commands {
         /// The output file or directory.
         out_path: PathBuf,
     },
-    ExtractJxb {
-        /// Extract all .jxb files in the specified directory instead.
+    /// Extracts a file or directory of files.
+    ///
+    /// Currently supported file types: jxb, jxk
+    Extract {
+        /// Extract all files in the specified directory instead.
         #[arg(short)]
         recursive: bool,
         /// The input file.
@@ -93,22 +96,33 @@ async fn main() {
             let elapsed = now.elapsed();
             eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
-        Commands::ExtractJxb {
+        Commands::Extract {
             recursive,
             in_path,
             out_path,
         } => {
             let now = Instant::now();
             if *recursive {
-                jxb::extract_directory(in_path, out_path)
+                extract::extract_directory(in_path, out_path)
                     .await
-                    .expect("Error extracting jxb file!");
+                    .expect("Error extracting files!");
                 eprintln!("Extracted files in directory.")
             } else {
-                jxb::extract_jxb_file(in_path, out_path)
-                    .await
-                    .expect("Error extracting jxb file!");
-                eprintln!("Extracted file.")
+                let Some(extension) = in_path.extension() else {
+                    panic!("File does not have an extension!");
+                };
+                if extension == "jxb" {
+                    extract::extract_jxb_file(in_path, out_path)
+                        .await
+                        .expect("Error extracting jxb file!");
+                } else if extension == "jxk" {
+                    extract::extract_jxk_file(in_path, out_path)
+                        .await
+                        .expect("Error extracting jxk file!");
+                } else {
+                    panic!("Unsupported extension!");
+                }
+                eprintln!("Extracted file.");
             }
             let elapsed = now.elapsed();
             eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());

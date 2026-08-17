@@ -350,16 +350,6 @@ struct JxbTag {
     value: i32,
 }
 
-impl JxbTag {
-    fn utf8_offset(&self) -> i32 {
-        if self.type_id == 3 {
-            std::cmp::max(self.key_offset, self.value)
-        } else {
-            self.key_offset
-        }
-    }
-}
-
 #[binread]
 #[br(little)]
 #[br(stream = reader)]

@@ -7,7 +7,7 @@ use std::{
 };
 
 use binrw::{
-    BinRead, BinResult, binread, binwrite,
+    BinRead, BinResult, BinWrite, binread, binwrite,
     helpers::{args_iter, until, until_exclusive},
 };
 use indexmap::IndexMap;
@@ -480,16 +480,16 @@ enum JxbStrings {
     Utf8Only {
         #[br(temp)]
         #[br(parse_with = until(
-            |string: &JxbUtf8String| string.utf8_values.len() == 1 // empty string is 1 byte
+            |string: &JxbStringData<u8>| string.string_data.len() == 1 // empty string is 1 byte
         ))]
         #[bw(calc(strings.iter().map(
-            |(_, text)| JxbUtf8String{ pos: <_>::default(), utf8_values: text.bytes().chain(once(0)).collect() }
+            |(_, text)| JxbStringData{ pos: <_>::default(), string_data: text.bytes().chain(once(0)).collect() }
         ).collect()))]
-        strings_vec: Vec<JxbUtf8String>,
+        strings_vec: Vec<JxbStringData<u8>>,
 
         #[br(try_calc(strings_vec.into_iter().map(|string| Ok((
             string.pos - string_region_pos,
-            str::from_utf8(&string.utf8_values[..string.utf8_values.len() - 1])?.to_string()
+            str::from_utf8(&string.string_data[..string.string_data.len() - 1])?.to_string()
         ))).collect::<Result<_,std::str::Utf8Error>>()))]
         #[bw(ignore)]
         strings: BTreeMap<i32, String>,
@@ -498,39 +498,39 @@ enum JxbStrings {
     Utf8AndUtf16 {
         #[br(temp)]
         #[br(parse_with = until_exclusive(
-            |string: &JxbUtf8String| string.utf8_values.len() == 1 // empty string is 1 byte
+            |string: &JxbStringData<u8>| string.string_data.len() == 1 // empty string is 1 byte
         ))]
         #[br(pad_after(-1))]
         #[bw(calc(utf8_strings.iter().map(|(_, text)|
-            JxbUtf8String{
+            JxbStringData{
                 pos: <_>::default(),
-                utf8_values: text.bytes().chain(once(0)).collect()
+                string_data: text.bytes().chain(once(0)).collect()
             }
         ).collect()))]
-        utf8_strings_vec: Vec<JxbUtf8String>,
+        utf8_strings_vec: Vec<JxbStringData<u8>>,
 
         #[br(try_calc(utf8_strings_vec.into_iter().map(|string| Ok((
             string.pos - string_region_pos,
-            str::from_utf8(&string.utf8_values[..string.utf8_values.len() - 1])?.to_string()
+            str::from_utf8(&string.string_data[..string.string_data.len() - 1])?.to_string()
         ))).collect::<Result<_,std::str::Utf8Error>>()))]
         #[bw(ignore)]
         utf8_strings: BTreeMap<i32, String>,
 
         #[br(temp)]
         #[br(parse_with = until(
-            |string: &JxbUtf16String| string.pos >= string_region_pos + node_text_offset_max
+            |string: &JxbStringData<u16>| string.pos >= string_region_pos + node_text_offset_max
         ))]
         #[bw(calc(utf16_strings.iter().map(|(_, text)|
-            JxbUtf16String{
+            JxbStringData{
                 pos: <_>::default(),
-                utf16_values: text.encode_utf16().chain(once(0)).collect()
+                string_data: text.encode_utf16().chain(once(0)).collect()
             }
         ).collect()))]
-        utf16_strings_vec: Vec<JxbUtf16String>,
+        utf16_strings_vec: Vec<JxbStringData<u16>>,
 
         #[br(try_calc(utf16_strings_vec.into_iter().map(|string| Ok((
             string.pos - string_region_pos,
-            String::from_utf16(&string.utf16_values[..string.utf16_values.len() - 1])?
+            String::from_utf16(&string.string_data[..string.string_data.len() - 1])?
         ))).collect::<Result<_,std::string::FromUtf16Error>>()))]
         #[br(assert(
             utf16_strings.first_entry().is_none_or(|entry|entry.get().is_empty()),
@@ -547,29 +547,17 @@ enum JxbStrings {
 #[brw(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
-struct JxbUtf8String {
+struct JxbStringData<T>
+where
+    for<'a> T: BinRead<Args<'a> = ()> + BinWrite<Args<'a> = ()> + Default + PartialEq + 'static,
+{
     // store current stream position when reading starts
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     #[bw(ignore)]
     pos: i32,
 
-    #[br(parse_with = until(|&value| value == 0))]
-    utf8_values: Vec<u8>,
-}
-
-#[binread]
-#[binwrite]
-#[brw(little)]
-#[brw(stream = reader)]
-#[derive(Debug)]
-struct JxbUtf16String {
-    // store current stream position when reading starts
-    #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
-    #[bw(ignore)]
-    pos: i32,
-
-    #[br(parse_with = until(|&value| value == 0))]
-    utf16_values: Vec<u16>,
+    #[br(parse_with = until(|value| *value == T::default()))]
+    string_data: Vec<T>,
 }
 
 impl<'a> Jxb {

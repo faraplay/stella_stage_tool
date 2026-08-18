@@ -233,9 +233,9 @@ struct Jxb {
     #[brw(magic = b"JXB\0\x01\x00\x01")]
     #[br(temp)]
     #[br(assert(uses_utf16 == 1 || uses_utf16 == 2))]
-    #[bw(calc(match strings {
-        JxbStrings::Utf8Only{..} => 1,
-        JxbStrings::Utf8AndUtf16{..} => 2,
+    #[bw(calc(match strings.utf16_strings {
+        None => 1,
+        Some(_) => 2,
     }))]
     uses_utf16: u8,
     #[br(temp)]
@@ -479,75 +479,65 @@ struct JxbTag {
 #[brw(little)]
 #[br(import(uses_utf16: u8, string_region_pos: i32, node_text_offset_min: i32, node_text_offset_max: i32))]
 #[derive(Debug)]
-enum JxbStrings {
-    #[br(assert(uses_utf16 == 1))]
-    Utf8Only {
-        #[br(temp)]
-        #[br(parse_with = until(
-            |string: &JxbStringData<u8>|
-            string.pos + string.string_data.len() as i32 + 1
-            >= string_region_pos + node_text_offset_min + 1
-        ))]
-        #[bw(calc(strings.iter().map(
-            |(_, text)| JxbStringData{ pos: <_>::default(), string_data: text.bytes().collect() }
-        ).collect()))]
-        strings_vec: Vec<JxbStringData<u8>>,
-
-        #[br(try_calc(strings_vec.into_iter().map(|string| Ok((
-            string.pos - string_region_pos,
-            String::from_utf8(string.string_data.clone())?
-        ))).collect::<Result<_,std::string::FromUtf8Error>>()))]
+struct JxbStrings {
+    #[br(temp, calc(
+        if uses_utf16 == 1 {
+            string_region_pos + node_text_offset_min + 1
+        } else {
+            string_region_pos + node_text_offset_min
+        }))]
         #[bw(ignore)]
-        strings: BTreeMap<i32, String>,
-    },
+    utf8_region_end_pos: i32,
 
-    #[br(assert(uses_utf16 == 2))]
-    Utf8AndUtf16 {
         #[br(temp)]
         #[br(parse_with = until(
             |string: &JxbStringData<u8>|
-            string.pos + string.string_data.len() as i32 + 1
-            >= string_region_pos + node_text_offset_min
+        string.pos + string.string_data.len() as i32 + 1 >= utf8_region_end_pos
         ))]
         #[bw(calc(utf8_strings.iter().map(|(_, text)|
-            JxbStringData{
-                pos: <_>::default(),
-                string_data: text.bytes().collect()
-            }
+        JxbStringData{ pos: 0, string_data: text.bytes().collect() }
         ).collect()))]
         utf8_strings_vec: Vec<JxbStringData<u8>>,
 
-        #[br(try_calc(utf8_strings_vec.into_iter().map(|string| Ok((
+    #[br(temp)]
+    #[br(if(uses_utf16 == 2))]
+    #[br(parse_with = until(
+        |string: &JxbStringData<u16>| string.pos >= string_region_pos + node_text_offset_max
+    ))]
+    #[bw(calc(
+        if let Some(utf16_strings) = utf16_strings {
+            utf16_strings.iter().map(|(_, text)|
+                JxbStringData{ pos: 0, string_data: text.encode_utf16().collect() }
+            ).collect()
+        } else {
+            Vec::new()
+        }
+    ))]
+    utf16_strings_vec: Vec<JxbStringData<u16>>,
+
+    #[br(try_calc(
+        utf8_strings_vec.into_iter().map(|string| Ok((
             string.pos - string_region_pos,
             String::from_utf8(string.string_data.clone())?
-        ))).collect::<Result<_,std::string::FromUtf8Error>>()))]
+        ))).collect::<Result<_,std::string::FromUtf8Error>>()
+    ))]
         #[bw(ignore)]
         utf8_strings: BTreeMap<i32, String>,
 
-        #[br(temp)]
-        #[br(parse_with = until(
-            |string: &JxbStringData<u16>| string.pos >= string_region_pos + node_text_offset_max
-        ))]
-        #[bw(calc(utf16_strings.iter().map(|(_, text)|
-            JxbStringData{
-                pos: <_>::default(),
-                string_data: text.encode_utf16().collect()
-            }
-        ).collect()))]
-        utf16_strings_vec: Vec<JxbStringData<u16>>,
-
-        #[br(try_calc(utf16_strings_vec.into_iter().map(|string| Ok((
+    #[br(if(uses_utf16 == 2))]
+    #[br(try_calc(
+        utf16_strings_vec
+        .into_iter()
+        .map(|string| 
+            Ok((
             string.pos - string_region_pos,
             String::from_utf16(&string.string_data)?
-        ))).collect::<Result<_,std::string::FromUtf16Error>>()))]
-        #[br(assert(
-            utf16_strings.first_entry().is_none_or(|entry|entry.get().is_empty()),
-            "the first utf16 string is not the empty string, it is {}",
-            utf16_strings.first_key_value().unwrap().1,
+            ))
+        ).collect::<Result<_,std::string::FromUtf16Error>>()
+        .and_then(|utf16_strings| Ok(Some(utf16_strings)))
         ))]
         #[bw(ignore)]
-        utf16_strings: BTreeMap<i32, String>,
-    },
+    utf16_strings: Option<BTreeMap<i32, String>>,
 }
 
 #[binread]
@@ -597,35 +587,20 @@ impl<'a> JxbNode<'a> {
         strings: &'a JxbStrings,
     ) -> std::io::Result<JxbNode<'a>> {
         let b = &node_data_bs[index as usize];
-        let (key_source, value_source, node_text_source);
-        match strings {
-            JxbStrings::Utf8Only { strings } => {
-                key_source = strings;
-                value_source = strings;
-                node_text_source = strings;
-            }
-            JxbStrings::Utf8AndUtf16 {
-                utf8_strings,
-                utf16_strings,
-            } => {
-                key_source = utf8_strings;
-                value_source = utf8_strings;
-                node_text_source = utf16_strings;
-            }
-        }
+        let text_strings = strings.utf16_strings.as_ref().unwrap_or(&strings.utf8_strings);
         Ok(JxbNode {
-            node_type: get_string(b.node_type_offset, key_source)?,
+            node_type: get_string(b.node_type_offset, &strings.utf8_strings)?,
             tags: b
                 .tags
                 .iter()
                 .map(|b_tag| {
                     Ok((
-                        get_string(b_tag.key_offset, key_source)?,
-                        JxbValue::new(b_tag, value_source)?,
+                        get_string(b_tag.key_offset, &strings.utf8_strings)?,
+                        JxbValue::new(b_tag, &strings.utf8_strings)?,
                     ))
                 })
                 .collect::<std::io::Result<_>>()?,
-            text: get_string(b.text_offset, node_text_source)?,
+            text: get_string(b.text_offset, text_strings)?,
             children: (b.children_start_index..b.children_start_index + b.child_count)
                 .map(|child_index| JxbNode::new(child_index, node_data_bs, strings))
                 .collect::<std::io::Result<_>>()?,

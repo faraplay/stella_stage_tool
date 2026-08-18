@@ -375,7 +375,6 @@ struct Jxb {
     #[brw(align_before = 0x10)]
     #[br(args(
         uses_utf16,
-        string_region_pos,
         node_text_offset_min,
         node_text_offset_max
     ))]
@@ -477,32 +476,38 @@ struct JxbTag {
 #[binread]
 #[binwrite]
 #[brw(little)]
-#[br(import(uses_utf16: u8, string_region_pos: i32, node_text_offset_min: i32, node_text_offset_max: i32))]
+#[br(stream = reader)]
+#[br(import(uses_utf16: u8, node_text_offset_min: i32, node_text_offset_max: i32))]
 #[derive(Debug)]
 struct JxbStrings {
+    // store current stream position when reading starts
+    #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
+    #[bw(ignore)]
+    start_pos: i32,
+
     #[br(temp, calc(
         if uses_utf16 == 1 {
-            string_region_pos + node_text_offset_min + 1
+            start_pos + node_text_offset_min + 1
         } else {
-            string_region_pos + node_text_offset_min
+            start_pos + node_text_offset_min
         }))]
-        #[bw(ignore)]
+    #[bw(ignore)]
     utf8_region_end_pos: i32,
 
-        #[br(temp)]
-        #[br(parse_with = until(
-            |string: &JxbStringData<u8>|
-        string.pos + string.string_data.len() as i32 + 1 >= utf8_region_end_pos
-        ))]
-        #[bw(calc(utf8_strings.iter().map(|(_, text)|
-        JxbStringData{ pos: 0, string_data: text.bytes().collect() }
-        ).collect()))]
-        utf8_strings_vec: Vec<JxbStringData<u8>>,
+    #[br(temp)]
+    #[br(parse_with = until(
+        |string: &JxbStringData<u8>|
+    string.pos + string.string_data.len() as i32 + 1 >= utf8_region_end_pos
+    ))]
+    #[bw(calc(utf8_strings.iter().map(|(_, text)|
+    JxbStringData{ pos: 0, string_data: text.bytes().collect() }
+    ).collect()))]
+    utf8_strings_vec: Vec<JxbStringData<u8>>,
 
     #[br(temp)]
     #[br(if(uses_utf16 == 2))]
     #[br(parse_with = until(
-        |string: &JxbStringData<u16>| string.pos >= string_region_pos + node_text_offset_max
+        |string: &JxbStringData<u16>| string.pos >= start_pos + node_text_offset_max
     ))]
     #[bw(calc(
         if let Some(utf16_strings) = utf16_strings {
@@ -517,12 +522,12 @@ struct JxbStrings {
 
     #[br(try_calc(
         utf8_strings_vec.into_iter().map(|string| Ok((
-            string.pos - string_region_pos,
+            string.pos - start_pos,
             String::from_utf8(string.string_data.clone())?
         ))).collect::<Result<_,std::string::FromUtf8Error>>()
     ))]
-        #[bw(ignore)]
-        utf8_strings: BTreeMap<i32, String>,
+    #[bw(ignore)]
+    utf8_strings: BTreeMap<i32, String>,
 
     #[br(if(uses_utf16 == 2))]
     #[br(try_calc(
@@ -530,7 +535,7 @@ struct JxbStrings {
         .into_iter()
         .map(|string| 
             Ok((
-            string.pos - string_region_pos,
+            string.pos - start_pos,
             String::from_utf16(&string.string_data)?
             ))
         ).collect::<Result<_,std::string::FromUtf16Error>>()

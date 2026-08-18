@@ -2,8 +2,7 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, HashSet},
     io::Cursor,
-    iter::once,
-    path::Path,
+        path::Path,
 };
 
 use binrw::{
@@ -480,39 +479,40 @@ enum JxbStrings {
     Utf8Only {
         #[br(temp)]
         #[br(parse_with = until(
-            |string: &JxbStringData<u8>| string.string_data.len() == 1 // empty string is 1 byte
+            |string: &JxbStringData<u8>| string.string_data.is_empty()
         ))]
         #[bw(calc(strings.iter().map(
-            |(_, text)| JxbStringData{ pos: <_>::default(), string_data: text.bytes().chain(once(0)).collect() }
+            |(_, text)| JxbStringData{ pos: <_>::default(), string_data: text.bytes().collect() }
         ).collect()))]
         strings_vec: Vec<JxbStringData<u8>>,
 
         #[br(try_calc(strings_vec.into_iter().map(|string| Ok((
             string.pos - string_region_pos,
-            str::from_utf8(&string.string_data[..string.string_data.len() - 1])?.to_string()
-        ))).collect::<Result<_,std::str::Utf8Error>>()))]
+            String::from_utf8(string.string_data.clone())?
+        ))).collect::<Result<_,std::string::FromUtf8Error>>()))]
         #[bw(ignore)]
         strings: BTreeMap<i32, String>,
     },
+
     #[br(assert(uses_utf16 == 2))]
     Utf8AndUtf16 {
         #[br(temp)]
         #[br(parse_with = until_exclusive(
-            |string: &JxbStringData<u8>| string.string_data.len() == 1 // empty string is 1 byte
+            |string: &JxbStringData<u8>| string.string_data.is_empty()
         ))]
         #[br(pad_after(-1))]
         #[bw(calc(utf8_strings.iter().map(|(_, text)|
             JxbStringData{
                 pos: <_>::default(),
-                string_data: text.bytes().chain(once(0)).collect()
+                string_data: text.bytes().collect()
             }
         ).collect()))]
         utf8_strings_vec: Vec<JxbStringData<u8>>,
 
         #[br(try_calc(utf8_strings_vec.into_iter().map(|string| Ok((
             string.pos - string_region_pos,
-            str::from_utf8(&string.string_data[..string.string_data.len() - 1])?.to_string()
-        ))).collect::<Result<_,std::str::Utf8Error>>()))]
+            String::from_utf8(string.string_data.clone())?
+        ))).collect::<Result<_,std::string::FromUtf8Error>>()))]
         #[bw(ignore)]
         utf8_strings: BTreeMap<i32, String>,
 
@@ -523,14 +523,14 @@ enum JxbStrings {
         #[bw(calc(utf16_strings.iter().map(|(_, text)|
             JxbStringData{
                 pos: <_>::default(),
-                string_data: text.encode_utf16().chain(once(0)).collect()
+                string_data: text.encode_utf16().collect()
             }
         ).collect()))]
         utf16_strings_vec: Vec<JxbStringData<u16>>,
 
         #[br(try_calc(utf16_strings_vec.into_iter().map(|string| Ok((
             string.pos - string_region_pos,
-            String::from_utf16(&string.string_data[..string.string_data.len() - 1])?
+            String::from_utf16(&string.string_data)?
         ))).collect::<Result<_,std::string::FromUtf16Error>>()))]
         #[br(assert(
             utf16_strings.first_entry().is_none_or(|entry|entry.get().is_empty()),
@@ -556,8 +556,13 @@ where
     #[bw(ignore)]
     pos: i32,
 
-    #[br(parse_with = until(|value| *value == T::default()))]
+    #[br(parse_with = until_exclusive(|value| *value == T::default()))]
     string_data: Vec<T>,
+
+    // do not include the null terminator in the data
+    #[br(temp, ignore)]
+    #[bw(calc(T::default()))]
+    null_terminator: T,
 }
 
 impl<'a> Jxb {

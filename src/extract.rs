@@ -373,7 +373,12 @@ struct Jxb {
     node_text_offset_max: i32,
 
     #[brw(align_before = 0x10)]
-    #[br(args(uses_utf16, string_region_pos, node_text_offset_max))]
+    #[br(args(
+        uses_utf16,
+        string_region_pos,
+        node_text_offset_min,
+        node_text_offset_max
+    ))]
     strings: JxbStrings,
 }
 
@@ -472,14 +477,16 @@ struct JxbTag {
 #[binread]
 #[binwrite]
 #[brw(little)]
-#[br(import(uses_utf16: u8, string_region_pos: i32, node_text_offset_max: i32))]
+#[br(import(uses_utf16: u8, string_region_pos: i32, node_text_offset_min: i32, node_text_offset_max: i32))]
 #[derive(Debug)]
 enum JxbStrings {
     #[br(assert(uses_utf16 == 1))]
     Utf8Only {
         #[br(temp)]
         #[br(parse_with = until(
-            |string: &JxbStringData<u8>| string.string_data.is_empty()
+            |string: &JxbStringData<u8>|
+            string.pos + string.string_data.len() as i32 + 1
+            >= string_region_pos + node_text_offset_min + 1
         ))]
         #[bw(calc(strings.iter().map(
             |(_, text)| JxbStringData{ pos: <_>::default(), string_data: text.bytes().collect() }
@@ -497,10 +504,11 @@ enum JxbStrings {
     #[br(assert(uses_utf16 == 2))]
     Utf8AndUtf16 {
         #[br(temp)]
-        #[br(parse_with = until_exclusive(
-            |string: &JxbStringData<u8>| string.string_data.is_empty()
+        #[br(parse_with = until(
+            |string: &JxbStringData<u8>|
+            string.pos + string.string_data.len() as i32 + 1
+            >= string_region_pos + node_text_offset_min
         ))]
-        #[br(pad_after(-1))]
         #[bw(calc(utf8_strings.iter().map(|(_, text)|
             JxbStringData{
                 pos: <_>::default(),

@@ -373,11 +373,7 @@ struct Jxb {
     node_text_offset_max: i32,
 
     #[brw(align_before = 0x10)]
-    #[br(args(
-        uses_utf16,
-        node_text_offset_min,
-        node_text_offset_max
-    ))]
+    #[br(args(uses_utf16, node_text_offset_min, node_text_offset_max))]
     strings: JxbStrings,
 }
 
@@ -533,7 +529,7 @@ struct JxbStrings {
     #[br(try_calc(
         utf16_strings_vec
         .into_iter()
-        .map(|string| 
+        .map(|string|
             Ok((
             string.pos - start_pos,
             String::from_utf16(&string.string_data)?
@@ -541,7 +537,7 @@ struct JxbStrings {
         ).collect::<Result<_,std::string::FromUtf16Error>>()
         .and_then(|utf16_strings| Ok(Some(utf16_strings)))
         ))]
-        #[bw(ignore)]
+    #[bw(ignore)]
     utf16_strings: Option<BTreeMap<i32, String>>,
 }
 
@@ -570,7 +566,29 @@ where
 
 impl<'a> Jxb {
     fn get_node(&'a self, index: i32) -> std::io::Result<JxbNode<'a>> {
-        JxbNode::new(index, &self.node_data_bs, &self.strings)
+        let b = &self.node_data_bs[index as usize];
+        let text_strings = self
+            .strings
+            .utf16_strings
+            .as_ref()
+            .unwrap_or(&self.strings.utf8_strings);
+        Ok(JxbNode {
+            node_type: get_string(b.node_type_offset, &self.strings.utf8_strings)?,
+            tags: b
+                .tags
+                .iter()
+                .map(|tag| {
+                    Ok((
+                        get_string(tag.key_offset, &self.strings.utf8_strings)?,
+                        JxbValue::new(tag, &self.strings.utf8_strings)?,
+                    ))
+                })
+                .collect::<std::io::Result<_>>()?,
+            text: get_string(b.text_offset, text_strings)?,
+            children: (b.children_start_index..b.children_start_index + b.child_count)
+                .map(|child_index| self.get_node(child_index))
+                .collect::<std::io::Result<_>>()?,
+        })
     }
     fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
         self.get_node(0)
@@ -586,32 +604,6 @@ struct JxbNode<'a> {
 }
 
 impl<'a> JxbNode<'a> {
-    fn new(
-        index: i32,
-        node_data_bs: &'a [JxbNodeDataB],
-        strings: &'a JxbStrings,
-    ) -> std::io::Result<JxbNode<'a>> {
-        let b = &node_data_bs[index as usize];
-        let text_strings = strings.utf16_strings.as_ref().unwrap_or(&strings.utf8_strings);
-        Ok(JxbNode {
-            node_type: get_string(b.node_type_offset, &strings.utf8_strings)?,
-            tags: b
-                .tags
-                .iter()
-                .map(|b_tag| {
-                    Ok((
-                        get_string(b_tag.key_offset, &strings.utf8_strings)?,
-                        JxbValue::new(b_tag, &strings.utf8_strings)?,
-                    ))
-                })
-                .collect::<std::io::Result<_>>()?,
-            text: get_string(b.text_offset, text_strings)?,
-            children: (b.children_start_index..b.children_start_index + b.child_count)
-                .map(|child_index| JxbNode::new(child_index, node_data_bs, strings))
-                .collect::<std::io::Result<_>>()?,
-        })
-    }
-
     async fn write_xml<W>(&self, writer: &mut Writer<W>) -> quick_xml::Result<()>
     where
         W: AsyncWrite + Unpin,

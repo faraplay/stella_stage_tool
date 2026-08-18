@@ -465,6 +465,7 @@ struct JxbNodeDataB {
 struct JxbTag {
     key_offset: i32,
     #[br(if(tags_type_id == 1, tags_type_id as u32))]
+    #[bw(if(tags_type_id == 1))]
     type_id: u32,
     value: i32,
 }
@@ -519,7 +520,7 @@ enum JxbStrings {
         #[br(parse_with = until(
             |string: &JxbUtf16String| string.pos >= string_region_pos + node_text_offset_max
         ))]
-        #[bw(calc(utf8_strings.iter().map(|(_, text)|
+        #[bw(calc(utf16_strings.iter().map(|(_, text)|
             JxbUtf16String{
                 pos: <_>::default(),
                 utf16_values: text.encode_utf16().chain(once(0)).collect()

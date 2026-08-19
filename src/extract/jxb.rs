@@ -5,10 +5,10 @@ use binrw::{
     helpers::{args_iter, until, until_exclusive},
 };
 
-use self::jxb_node::JxbNode;
+use self::node::Node;
 use crate::size::get_size;
 
-mod jxb_node;
+mod node;
 
 #[binread]
 #[binwrite]
@@ -26,7 +26,7 @@ pub struct Jxb {
     #[brw(magic = b"JXB\0\x01\x00\x01")]
     #[br(temp)]
     #[br(assert(uses_utf16 == 1 || uses_utf16 == 2))]
-    #[bw(calc(match strings.utf16_strings {
+    #[bw(calc(match string_pool.utf16_strings {
         None => 1,
         Some(_) => 2,
     }))]
@@ -78,14 +78,14 @@ pub struct Jxb {
         "incorrect stream position for b_region_pos, expected {:X}",
         b_region_pos,
     ))]
-    node_data_as: Vec<JxbNodeDataA>,
+    node_data_as: Vec<NodeDataA>,
 
     #[br(parse_with = args_iter(
         node_data_as.iter().map(
             |a| (b_region_pos + a.b_offset, a.tags_type_id, a.tag_count)
         )
     ))]
-    node_data_bs: Vec<JxbNodeDataB>,
+    node_data_bs: Vec<NodeDataB>,
 
     #[brw(align_after = 0x10)]
     #[br(temp, try_calc(
@@ -167,14 +167,14 @@ pub struct Jxb {
 
     #[brw(align_before = 0x10)]
     #[br(args(uses_utf16, node_text_offset_min, node_text_offset_max))]
-    strings: JxbStrings,
+    string_pool: StringPool,
 }
 
 #[binread]
 #[binwrite]
 #[brw(little)]
 #[derive(Debug)]
-struct JxbNodeDataA {
+struct NodeDataA {
     #[brw(magic = b"\x03\0")]
     tags_type_id: u16,
     tag_count: u32,
@@ -193,7 +193,7 @@ struct JxbNodeDataA {
     expected_offset,
 ))]
 #[derive(Debug)]
-struct JxbNodeDataB {
+struct NodeDataB {
     node_type_offset: i32,
     children_start_index: i32,
     child_count: i32,
@@ -209,7 +209,7 @@ struct JxbNodeDataB {
             1
         }
     ))]
-    tags: Vec<JxbTag>,
+    tags: Vec<TagData>,
 
     #[br(temp, try_calc(
         (||{
@@ -254,7 +254,7 @@ struct JxbNodeDataB {
 #[brw(little)]
 #[brw(import(tags_type_id: u16))]
 #[derive(Debug)]
-struct JxbTag {
+struct TagData {
     key_offset: i32,
     #[br(if(tags_type_id == 1, tags_type_id as u32))]
     #[bw(if(tags_type_id == 1))]
@@ -268,7 +268,7 @@ struct JxbTag {
 #[br(stream = reader)]
 #[br(import(uses_utf16: u8, node_text_offset_min: i32, node_text_offset_max: i32))]
 #[derive(Debug)]
-struct JxbStrings {
+struct StringPool {
     // store current stream position when reading starts
     #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     #[bw(ignore)]
@@ -285,34 +285,34 @@ struct JxbStrings {
 
     #[br(temp)]
     #[br(parse_with = until(
-        |string: &JxbStringData<u8>|
-    string.pos + string.string_data.len() as i32 + 1 >= utf8_region_end_pos
+        |string: &StringData<u8>|
+    string.pos + string.data.len() as i32 + 1 >= utf8_region_end_pos
     ))]
     #[bw(calc(utf8_strings.iter().map(|(_, text)|
-    JxbStringData{ pos: 0, string_data: text.bytes().collect() }
+    StringData{ pos: 0, data: text.bytes().collect() }
     ).collect()))]
-    utf8_strings_vec: Vec<JxbStringData<u8>>,
+    utf8_strings_vec: Vec<StringData<u8>>,
 
     #[br(temp)]
     #[br(if(uses_utf16 == 2))]
     #[br(parse_with = until(
-        |string: &JxbStringData<u16>| string.pos >= start_pos + node_text_offset_max
+        |string: &StringData<u16>| string.pos >= start_pos + node_text_offset_max
     ))]
     #[bw(calc(
         if let Some(utf16_strings) = utf16_strings {
             utf16_strings.iter().map(|(_, text)|
-                JxbStringData{ pos: 0, string_data: text.encode_utf16().collect() }
+                StringData{ pos: 0, data: text.encode_utf16().collect() }
             ).collect()
         } else {
             Vec::new()
         }
     ))]
-    utf16_strings_vec: Vec<JxbStringData<u16>>,
+    utf16_strings_vec: Vec<StringData<u16>>,
 
     #[br(try_calc(
         utf8_strings_vec.into_iter().map(|string| Ok((
             string.pos - start_pos,
-            String::from_utf8(string.string_data.clone())?
+            String::from_utf8(string.data.clone())?
         ))).collect::<Result<_,std::string::FromUtf8Error>>()
     ))]
     #[bw(ignore)]
@@ -325,7 +325,7 @@ struct JxbStrings {
         .map(|string|
             Ok((
             string.pos - start_pos,
-            String::from_utf16(&string.string_data)?
+            String::from_utf16(&string.data)?
             ))
         ).collect::<Result<_,std::string::FromUtf16Error>>()
         .and_then(|utf16_strings| Ok(Some(utf16_strings)))
@@ -339,7 +339,7 @@ struct JxbStrings {
 #[brw(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
-struct JxbStringData<T>
+struct StringData<T>
 where
     for<'a> T: BinRead<Args<'a> = ()> + BinWrite<Args<'a> = ()> + Default + PartialEq + 'static,
 {
@@ -349,7 +349,7 @@ where
     pos: i32,
 
     #[br(parse_with = until_exclusive(|value| *value == T::default()))]
-    string_data: Vec<T>,
+    data: Vec<T>,
 
     // do not include the null terminator in the data
     #[br(temp, ignore)]
@@ -358,10 +358,10 @@ where
 }
 
 impl<'a> Jxb {
-    pub fn get_node(&'a self, index: i32) -> std::io::Result<JxbNode<'a>> {
-        JxbNode::new(index, &self.node_data_bs, &self.strings)
+    pub fn get_node(&'a self, index: i32) -> std::io::Result<Node<'a>> {
+        Node::new(index, &self.node_data_bs, &self.string_pool)
     }
-    pub fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
+    pub fn root_node(&'a self) -> std::io::Result<Node<'a>> {
         self.get_node(0)
     }
 }

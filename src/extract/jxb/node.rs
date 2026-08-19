@@ -4,43 +4,43 @@ use indexmap::IndexMap;
 use quick_xml::{Writer, events::BytesText};
 use tokio::io::AsyncWrite;
 
-use super::JxbTag;
-use crate::extract::jxb::{JxbNodeDataB, JxbStrings};
+use super::TagData;
+use crate::extract::jxb::{NodeDataB, StringPool};
 
 #[derive(Debug)]
-pub struct JxbNode<'a> {
+pub struct Node<'a> {
     node_type: &'a str,
-    tags: IndexMap<&'a str, JxbValue<'a>>,
+    tags: IndexMap<&'a str, Value<'a>>,
     text: &'a str,
-    children: Vec<JxbNode<'a>>,
+    children: Vec<Node<'a>>,
 }
 
-impl<'a> JxbNode<'a> {
+impl<'a> Node<'a> {
     pub(super) fn new(
         index: i32,
-        node_data_bs: &[JxbNodeDataB],
-        strings: &'a JxbStrings,
-    ) -> std::io::Result<JxbNode<'a>> {
+        node_data_bs: &[NodeDataB],
+        string_pool: &'a StringPool,
+    ) -> std::io::Result<Node<'a>> {
         let b = &node_data_bs[index as usize];
-        let text_strings = strings
+        let text_strings = string_pool
             .utf16_strings
             .as_ref()
-            .unwrap_or(&strings.utf8_strings);
-        Ok(JxbNode {
-            node_type: get_string(b.node_type_offset, &strings.utf8_strings)?,
+            .unwrap_or(&string_pool.utf8_strings);
+        Ok(Node {
+            node_type: get_string(b.node_type_offset, &string_pool.utf8_strings)?,
             tags: b
                 .tags
                 .iter()
                 .map(|tag| {
                     Ok((
-                        get_string(tag.key_offset, &strings.utf8_strings)?,
-                        JxbValue::new(tag, &strings.utf8_strings)?,
+                        get_string(tag.key_offset, &string_pool.utf8_strings)?,
+                        Value::new(tag, &string_pool.utf8_strings)?,
                     ))
                 })
                 .collect::<std::io::Result<_>>()?,
             text: get_string(b.text_offset, text_strings)?,
             children: (b.children_start_index..b.children_start_index + b.child_count)
-                .map(|child_index| JxbNode::new(child_index, node_data_bs, strings))
+                .map(|child_index| Node::new(child_index, node_data_bs, string_pool))
                 .collect::<std::io::Result<_>>()?,
         })
     }
@@ -50,7 +50,7 @@ impl<'a> JxbNode<'a> {
     }
 
     pub fn get_text_tag(&self, key: &str) -> std::io::Result<&str> {
-        let JxbValue::Text(value) = self.tags.get(key).ok_or(std::io::Error::new(
+        let Value::Text(value) = self.tags.get(key).ok_or(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Could not find tag with key {key} on node"),
         ))?
@@ -98,7 +98,7 @@ impl<'a> JxbNode<'a> {
 }
 
 #[derive(Debug)]
-pub enum JxbValue<'a> {
+pub enum Value<'a> {
     Text(&'a str),
     Float(f32),
     Int(i32),
@@ -115,16 +115,13 @@ fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&
     }
 }
 
-impl<'a> JxbValue<'a> {
-    fn new(
-        b_tag: &JxbTag,
-        strings: &'a BTreeMap<i32, String>,
-    ) -> std::io::Result<JxbValue<'a>> {
+impl<'a> Value<'a> {
+    fn new(b_tag: &TagData, strings: &'a BTreeMap<i32, String>) -> std::io::Result<Value<'a>> {
         Ok(match b_tag.type_id {
-            3 => JxbValue::Text(get_string(b_tag.value, strings)?),
-            4 => JxbValue::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
-            5 => JxbValue::Int(b_tag.value),
-            6 => JxbValue::Bool(match b_tag.value {
+            3 => Value::Text(get_string(b_tag.value, strings)?),
+            4 => Value::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
+            5 => Value::Int(b_tag.value),
+            6 => Value::Bool(match b_tag.value {
                 0 => false,
                 1 => true,
                 _ => {
@@ -148,10 +145,10 @@ impl<'a> JxbValue<'a> {
 
     fn to_string(&'a self) -> Cow<'a, str> {
         match self {
-            JxbValue::Text(text) => Cow::Borrowed(*text),
-            JxbValue::Float(value) => Cow::Owned(value.to_string()),
-            JxbValue::Int(value) => Cow::Owned(value.to_string()),
-            JxbValue::Bool(value) => Cow::Owned(value.to_string()),
+            Value::Text(text) => Cow::Borrowed(*text),
+            Value::Float(value) => Cow::Owned(value.to_string()),
+            Value::Int(value) => Cow::Owned(value.to_string()),
+            Value::Bool(value) => Cow::Owned(value.to_string()),
         }
     }
 }

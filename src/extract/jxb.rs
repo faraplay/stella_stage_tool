@@ -273,7 +273,7 @@ struct TagData {
 #[derive(Debug)]
 struct StringPool {
     // store current stream position when reading starts
-    #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
+    #[br(temp, try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     #[bw(ignore)]
     start_pos: i32,
 
@@ -364,6 +364,7 @@ impl<'a> Jxb {
     pub fn get_node_data(&'a self, index: i32) -> std::io::Result<NodeData<'a>> {
         NodeData::new(&self.node_data_bs[index as usize], &self.string_pool)
     }
+
     pub fn root_node(&'a self) -> std::io::Result<Node<'a>> {
         let node_list = zip(&self.node_data_as, &self.node_data_bs)
             .map(|(a, b)| NodeDataWithPointers::new(a, b, &self.string_pool))

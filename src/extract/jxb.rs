@@ -1,11 +1,14 @@
-use std::collections::{BTreeMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    iter::zip,
+};
 
 use binrw::{
     BinRead, BinWrite, binread, binwrite,
     helpers::{args_iter, until, until_exclusive},
 };
 
-use self::node::Node;
+use self::node::{Node, NodeData, NodeDataWithPointers};
 use crate::size::get_size;
 
 mod node;
@@ -358,10 +361,13 @@ where
 }
 
 impl<'a> Jxb {
-    pub fn get_node(&'a self, index: i32) -> std::io::Result<Node<'a>> {
-        Node::new(index, &self.node_data_bs, &self.string_pool)
+    pub fn get_node_data(&'a self, index: i32) -> std::io::Result<NodeData<'a>> {
+        NodeData::new(&self.node_data_bs[index as usize], &self.string_pool)
     }
     pub fn root_node(&'a self) -> std::io::Result<Node<'a>> {
-        self.get_node(0)
+        let node_list = zip(&self.node_data_as, &self.node_data_bs)
+            .map(|(a, b)| NodeDataWithPointers::new(a, b, &self.string_pool))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Node::new(node_list, 0))
     }
 }

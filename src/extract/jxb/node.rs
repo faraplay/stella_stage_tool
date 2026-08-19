@@ -5,13 +5,21 @@ use quick_xml::{Writer, events::BytesText};
 use tokio::io::AsyncWrite;
 
 use super::TagData;
-use crate::extract::jxb::{NodeDataB, StringPool};
+use crate::extract::jxb::{NodeDataA, NodeDataB, StringPool};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct NodeData<'a> {
     node_type: &'a str,
     tags: IndexMap<&'a str, Value<'a>>,
     text: &'a str,
+}
+
+#[derive(Debug)]
+pub struct NodeDataWithPointers<'a> {
+    data: NodeData<'a>,
+    parent_index: i32,
+    children_start_index: i32,
+    child_count: i32,
 }
 
 #[derive(Debug)]
@@ -21,7 +29,10 @@ pub struct Node<'a> {
 }
 
 impl<'a> NodeData<'a> {
-    fn new(b: &'a NodeDataB, string_pool: &'a StringPool) -> std::io::Result<NodeData<'a>> {
+    pub(super) fn new(
+        b: &'a NodeDataB,
+        string_pool: &'a StringPool,
+    ) -> std::io::Result<NodeData<'a>> {
         let key_value_strings = &string_pool.utf8_strings;
         let text_strings = string_pool
             .utf16_strings
@@ -45,29 +56,13 @@ impl<'a> NodeData<'a> {
             text,
         })
     }
-}
-
-impl<'a> Node<'a> {
-    pub(super) fn new(
-        index: i32,
-        node_data_bs: &'a [NodeDataB],
-        string_pool: &'a StringPool,
-    ) -> std::io::Result<Node<'a>> {
-        let b = &node_data_bs[index as usize];
-        Ok(Node {
-            data: NodeData::new(b, string_pool)?,
-            children: (b.children_start_index..b.children_start_index + b.child_count)
-                .map(|child_index| Node::new(child_index, node_data_bs, string_pool))
-                .collect::<std::io::Result<_>>()?,
-        })
-    }
 
     pub fn get_type(&self) -> &str {
-        self.data.node_type
+        self.node_type
     }
 
     pub fn get_text_tag(&self, key: &str) -> std::io::Result<&str> {
-        let Value::Text(value) = self.data.tags.get(key).ok_or(std::io::Error::new(
+        let Value::Text(value) = self.tags.get(key).ok_or(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Could not find tag with key {key} on node"),
         ))?
@@ -78,6 +73,37 @@ impl<'a> Node<'a> {
             ));
         };
         Ok(value)
+    }
+}
+
+impl<'a> NodeDataWithPointers<'a> {
+    pub(super) fn new(
+        a: &'a NodeDataA,
+        b: &'a NodeDataB,
+        string_pool: &'a StringPool,
+    ) -> std::io::Result<NodeDataWithPointers<'a>> {
+        Ok(NodeDataWithPointers {
+            data: NodeData::new(b, string_pool)?,
+            parent_index: a.parent_index,
+            children_start_index: b.children_start_index,
+            child_count: b.child_count,
+        })
+    }
+}
+
+impl<'a> Node<'a> {
+    pub fn new(mut node_list: Vec<NodeDataWithPointers<'a>>, index: i32) -> Node<'a> {
+        Node::from_node_list(&mut node_list, index)
+    }
+
+    fn from_node_list(node_list: &mut [NodeDataWithPointers<'a>], index: i32) -> Node<'a> {
+        let node = &mut node_list[index as usize];
+        Node {
+            data: std::mem::take(&mut node.data),
+            children: (node.children_start_index..node.children_start_index + node.child_count)
+                .map(|child_index| Node::from_node_list(node_list, child_index))
+                .collect(),
+        }
     }
 
     pub async fn write_xml<W>(&self, writer: &mut Writer<W>) -> quick_xml::Result<()>

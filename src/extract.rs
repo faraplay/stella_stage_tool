@@ -109,15 +109,15 @@ pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
     drop(root_node);
 
     for metadata in jxk.file_metadatas {
-        let node = jxk.jxb.get_node(metadata.node_index)?;
-        if node.get_type() != "file" {
+        let node_data = jxk.jxb.get_node_data(metadata.node_index)?;
+        if node_data.get_type() != "file" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "jxk file metadata links to non-file node!",
             )
             .into());
         }
-        let file_name = node.get_text_tag("name")?;
+        let file_name = node_data.get_text_tag("name")?;
         let mut file_writer = File::create(out_path.join(file_name)).await?;
         reader
             .seek(std::io::SeekFrom::Start(metadata.data_offset as u64))

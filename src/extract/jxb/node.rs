@@ -8,37 +8,54 @@ use super::TagData;
 use crate::extract::jxb::{NodeDataB, StringPool};
 
 #[derive(Debug)]
-pub struct Node<'a> {
+pub struct NodeData<'a> {
     node_type: &'a str,
     tags: IndexMap<&'a str, Value<'a>>,
     text: &'a str,
+}
+
+#[derive(Debug)]
+pub struct Node<'a> {
+    data: NodeData<'a>,
     children: Vec<Node<'a>>,
+}
+
+impl<'a> NodeData<'a> {
+    fn new(b: &'a NodeDataB, string_pool: &'a StringPool) -> std::io::Result<NodeData<'a>> {
+        let key_value_strings = &string_pool.utf8_strings;
+        let text_strings = string_pool
+            .utf16_strings
+            .as_ref()
+            .unwrap_or(key_value_strings);
+        let node_type = get_string(b.node_type_offset, key_value_strings)?;
+        let tags = b
+            .tags
+            .iter()
+            .map(|tag| {
+                Ok((
+                    get_string(tag.key_offset, key_value_strings)?,
+                    Value::new(tag, key_value_strings)?,
+                ))
+            })
+            .collect::<std::io::Result<_>>()?;
+        let text = get_string(b.text_offset, text_strings)?;
+        Ok(NodeData {
+            node_type,
+            tags,
+            text,
+        })
+    }
 }
 
 impl<'a> Node<'a> {
     pub(super) fn new(
         index: i32,
-        node_data_bs: &[NodeDataB],
+        node_data_bs: &'a [NodeDataB],
         string_pool: &'a StringPool,
     ) -> std::io::Result<Node<'a>> {
         let b = &node_data_bs[index as usize];
-        let text_strings = string_pool
-            .utf16_strings
-            .as_ref()
-            .unwrap_or(&string_pool.utf8_strings);
         Ok(Node {
-            node_type: get_string(b.node_type_offset, &string_pool.utf8_strings)?,
-            tags: b
-                .tags
-                .iter()
-                .map(|tag| {
-                    Ok((
-                        get_string(tag.key_offset, &string_pool.utf8_strings)?,
-                        Value::new(tag, &string_pool.utf8_strings)?,
-                    ))
-                })
-                .collect::<std::io::Result<_>>()?,
-            text: get_string(b.text_offset, text_strings)?,
+            data: NodeData::new(b, string_pool)?,
             children: (b.children_start_index..b.children_start_index + b.child_count)
                 .map(|child_index| Node::new(child_index, node_data_bs, string_pool))
                 .collect::<std::io::Result<_>>()?,
@@ -46,11 +63,11 @@ impl<'a> Node<'a> {
     }
 
     pub fn get_type(&self) -> &str {
-        self.node_type
+        self.data.node_type
     }
 
     pub fn get_text_tag(&self, key: &str) -> std::io::Result<&str> {
-        let Value::Text(value) = self.tags.get(key).ok_or(std::io::Error::new(
+        let Value::Text(value) = self.data.tags.get(key).ok_or(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Could not find tag with key {key} on node"),
         ))?
@@ -67,14 +84,15 @@ impl<'a> Node<'a> {
     where
         W: AsyncWrite + Unpin,
     {
-        let element_writer = writer.create_element(self.node_type).with_attributes(
-            self.tags
+        let element_writer = writer.create_element(self.data.node_type).with_attributes(
+            self.data
+                .tags
                 .iter()
                 .map(|(key, value)| (*key, value.to_string())),
         );
-        if !self.text.is_empty() {
+        if !self.data.text.is_empty() {
             element_writer
-                .write_text_content_async(BytesText::new(self.text))
+                .write_text_content_async(BytesText::new(self.data.text))
                 .await?;
             return Ok(());
         }

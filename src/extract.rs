@@ -1,10 +1,10 @@
 use std::{io::Cursor, path::Path};
 
-use binrw::{BinRead, BinResult, binread, binwrite};
+use binrw::{BinRead, BinResult, BinWrite, binread, binwrite};
 use quick_xml::Writer;
 use tokio::{
     fs::{File, create_dir, metadata, read_dir},
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
     task::JoinSet,
 };
 
@@ -142,6 +142,19 @@ pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
         .write_xml(&mut xml_writer)
         .await
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(())
+}
+
+pub async fn build_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+    let reader = BufReader::new(File::open(in_path).await?);
+    let mut xml_reader = quick_xml::Reader::from_reader(reader);
+    let jxb = Jxb::from_xml(&mut xml_reader).await?;
+
+    let buffer = Vec::new();
+    let mut cursor = Cursor::new(buffer);
+    jxb.write_le(&mut cursor)?;
+    let mut writer = File::create(out_path).await?;
+    writer.write_all(&cursor.into_inner()).await?;
     Ok(())
 }
 

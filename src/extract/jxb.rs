@@ -371,4 +371,22 @@ impl<'a> Jxb {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Node::new(node_list, 0))
     }
+
+    pub async fn from_xml<R>(reader: &mut quick_xml::Reader<R>) -> std::io::Result<Jxb>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        let nodes = Node::read_xml(reader)
+            .await
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let Ok([node]) = TryInto::<[Node; 1]>::try_into(nodes) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "xml file contains more than one top-level node",
+            ));
+        };
+        let node_list = node.into_node_list();
+        let jxb = NodeDataWithPointers::into_jxb(node_list);
+        Ok(jxb)
+    }
 }

@@ -49,19 +49,28 @@ enum Commands {
         /// The output file.
         out_path: PathBuf,
     },
+    /// Builds a jxb file from an xml file.
+    ///
+    /// Currently supported file types: jxb, jxk
+    BuildJxb {
+        /// The input file.
+        in_path: PathBuf,
+        /// The output file.
+        out_path: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
+    let now = Instant::now();
     match &cli.command {
         Commands::Decrypt {
             recursive,
             in_path,
             out_path,
         } => {
-            let now = Instant::now();
             if *recursive {
                 crypt::decrypt_directory(in_path, out_path)
                     .await
@@ -73,8 +82,6 @@ async fn main() {
                     .expect("Failed to decrypt file!");
                 eprintln!("Decrypted file.")
             }
-            let elapsed = now.elapsed();
-            eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
         Commands::Encrypt {
             recursive,
@@ -82,7 +89,6 @@ async fn main() {
             in_path,
             out_path,
         } => {
-            let now = Instant::now();
             if *recursive {
                 crypt::encrypt_directory(in_path, out_path, *small)
                     .await
@@ -94,15 +100,12 @@ async fn main() {
                     .expect("Failed to encrypt file!");
                 eprintln!("Encrypted file.")
             }
-            let elapsed = now.elapsed();
-            eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
         Commands::Extract {
             recursive,
             in_path,
             out_path,
         } => {
-            let now = Instant::now();
             if *recursive {
                 extract::extract_directory(in_path, out_path)
                     .await
@@ -125,8 +128,14 @@ async fn main() {
                 }
                 eprintln!("Extracted file.");
             }
-            let elapsed = now.elapsed();
-            eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
+        }
+        Commands::BuildJxb { in_path, out_path } => {
+            extract::build_jxb_file(in_path, out_path)
+                .await
+                .expect("Error building jxb file!");
+            eprintln!("Built jxb file.");
         }
     }
+    let elapsed = now.elapsed();
+    eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
 }

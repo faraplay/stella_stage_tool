@@ -1,10 +1,13 @@
-use std::{io::Cursor, path::Path};
+use std::{
+    io::{Cursor, SeekFrom::Start},
+    path::Path,
+};
 
 use binrw::{BinRead, BinResult, BinWrite, binread, binwrite};
 use quick_xml::Writer;
 use tokio::{
     fs::{File, create_dir, metadata, read_dir},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, copy},
     task::JoinSet,
 };
 
@@ -145,6 +148,18 @@ pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
     Ok(())
 }
 
+pub async fn build_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+    let info_path = in_path.join("info.xml");
+    let info_reader = BufReader::new(File::open(info_path).await?);
+    let mut xml_reader = quick_xml::Reader::from_reader(info_reader);
+    let jxb = Jxb::from_xml(&mut xml_reader).await?;
+    let mut jxk = Jxk::new(jxb)?;
+    let mut writer = File::create(out_path).await?;
+    jxk.add_files_and_write(in_path, &mut writer).await?;
+
+    Ok(())
+}
+
 pub async fn build_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
     let reader = BufReader::new(File::open(in_path).await?);
     let mut xml_reader = quick_xml::Reader::from_reader(reader);
@@ -159,13 +174,16 @@ pub async fn build_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
 }
 
 #[binread]
+#[binwrite]
 #[br(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
 struct Jxk {
     #[brw(magic = b"JXK\0")]
     #[br(temp)]
+    #[bw(calc(file_metadatas.len() as i32))]
     file_count: i32,
+
     #[brw(magic = b"\0\0\0\0")]
     #[br(args { count: file_count as usize })]
     #[br(assert(
@@ -189,6 +207,7 @@ struct Jxk {
         other_bytes.is_none(),
         "Stream is not at end of file after reading jxb!",
     ))]
+    #[bw(ignore)]
     other_bytes: Option<u8>,
 
     #[br(align_before = 0x10)]
@@ -200,7 +219,67 @@ struct Jxk {
         "Unexpected stream position {:#X}",
         end_pos,
     ))]
+    #[bw(ignore)]
     end_pos: u64,
+}
+
+impl Jxk {
+    /// Create a new Jxk from a Jxb.
+    /// Note that the file offsets and sizes are set to zero and need to be filled in.
+    pub fn new(jxb: Jxb) -> std::io::Result<Jxk> {
+        let node_list = jxb.node_list()?;
+        let file_metadatas: Vec<FileMetadata> = node_list
+            .iter()
+            .enumerate()
+            .filter(|(_, node_data)| node_data.get_type() == "file")
+            .map(|(index, _)| FileMetadata {
+                node_index: index as i32,
+                data_offset: 0,
+                data_size: 0,
+            })
+            .collect();
+        Ok(Jxk {
+            file_metadatas,
+            jxb,
+        })
+    }
+    pub async fn add_files_and_write(
+        &mut self,
+        dir_path: &Path,
+        writer: &mut (impl AsyncWriteExt + AsyncSeekExt + Unpin),
+    ) -> BinResult<()> {
+        writer
+            .write_all(&vec![0u8; crate::size::get_size(self)])
+            .await?;
+        for file_metadata in self.file_metadatas.iter_mut() {
+            let old_offset = writer.stream_position().await?;
+            let offset = old_offset.next_multiple_of(0x10);
+            writer
+                .write_all(&vec![0u8; (offset - old_offset) as usize])
+                .await?;
+
+            let node_data = self.jxb.get_node_data(file_metadata.node_index)?;
+            if node_data.get_type() != "file" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "jxk file metadata links to non-file node!",
+                )
+                .into());
+            }
+            let file_name = node_data.get_text_tag("name")?;
+            let mut reader = File::open(dir_path.join(file_name)).await?;
+            let size = copy(&mut reader, writer).await?;
+            file_metadata.data_offset = offset as i32;
+            file_metadata.data_size = size as i32;
+        }
+        writer.seek(Start(0)).await?;
+        let buffer = Vec::new();
+        let mut cursor = Cursor::new(buffer);
+        self.write_le(&mut cursor)?;
+        writer.write_all(&cursor.into_inner()).await?;
+
+        Ok(())
+    }
 }
 
 #[binread]

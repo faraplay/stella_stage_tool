@@ -361,6 +361,13 @@ where
 }
 
 impl<'a> Jxb {
+    pub fn node_list(&'a self) -> std::io::Result<Vec<NodeData<'a>>> {
+        self.node_data_bs
+            .iter()
+            .map(|b| NodeData::new(b, &self.string_pool))
+            .collect()
+    }
+
     pub fn get_node_data(&'a self, index: i32) -> std::io::Result<NodeData<'a>> {
         NodeData::new(&self.node_data_bs[index as usize], &self.string_pool)
     }

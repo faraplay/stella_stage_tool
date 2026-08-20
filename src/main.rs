@@ -49,10 +49,12 @@ enum Commands {
         /// The output file.
         out_path: PathBuf,
     },
-    /// Builds a jxb file from an xml file.
+    /// Builds a file from a given file or directory of files.
     ///
     /// Currently supported file types: jxb, jxk
-    BuildJxb {
+    /// - To build a jxb file, the input should be a xml file.
+    /// - To build a jxk file, the input should be a directory containing a file called 'info.xml'.
+    Build {
         /// The input file.
         in_path: PathBuf,
         /// The output file.
@@ -129,11 +131,22 @@ async fn main() {
                 eprintln!("Extracted file.");
             }
         }
-        Commands::BuildJxb { in_path, out_path } => {
-            extract::build_jxb_file(in_path, out_path)
-                .await
-                .expect("Error building jxb file!");
-            eprintln!("Built jxb file.");
+        Commands::Build { in_path, out_path } => {
+            let Some(extension) = out_path.extension() else {
+                panic!("Output file name does not have an extension!");
+            };
+            if extension == "jxb" {
+                extract::build_jxb_file(in_path, out_path)
+                    .await
+                    .expect("Error building jxb file!");
+            } else if extension == "jxk" {
+                extract::build_jxk_file(in_path, out_path)
+                    .await
+                    .expect("Error building jxk file!");
+            } else {
+                panic!("Unsupported extension!");
+            }
+            eprintln!("Built file.");
         }
     }
     let elapsed = now.elapsed();

@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod crypt;
 mod extract;
+mod size;
 
 #[derive(Parser)]
 struct Cli {
@@ -48,19 +49,30 @@ enum Commands {
         /// The output file.
         out_path: PathBuf,
     },
+    /// Builds a file from a given file or directory of files.
+    ///
+    /// Currently supported file types: jxb, jxk
+    /// - To build a jxb file, the input should be a xml file.
+    /// - To build a jxk file, the input should be a directory containing a file called 'info.xml'.
+    Build {
+        /// The input file.
+        in_path: PathBuf,
+        /// The output file.
+        out_path: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
 
+    let now = Instant::now();
     match &cli.command {
         Commands::Decrypt {
             recursive,
             in_path,
             out_path,
         } => {
-            let now = Instant::now();
             if *recursive {
                 crypt::decrypt_directory(in_path, out_path)
                     .await
@@ -72,8 +84,6 @@ async fn main() {
                     .expect("Failed to decrypt file!");
                 eprintln!("Decrypted file.")
             }
-            let elapsed = now.elapsed();
-            eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
         Commands::Encrypt {
             recursive,
@@ -81,7 +91,6 @@ async fn main() {
             in_path,
             out_path,
         } => {
-            let now = Instant::now();
             if *recursive {
                 crypt::encrypt_directory(in_path, out_path, *small)
                     .await
@@ -93,15 +102,12 @@ async fn main() {
                     .expect("Failed to encrypt file!");
                 eprintln!("Encrypted file.")
             }
-            let elapsed = now.elapsed();
-            eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
         }
         Commands::Extract {
             recursive,
             in_path,
             out_path,
         } => {
-            let now = Instant::now();
             if *recursive {
                 extract::extract_directory(in_path, out_path)
                     .await
@@ -124,8 +130,25 @@ async fn main() {
                 }
                 eprintln!("Extracted file.");
             }
-            let elapsed = now.elapsed();
-            eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
+        }
+        Commands::Build { in_path, out_path } => {
+            let Some(extension) = out_path.extension() else {
+                panic!("Output file name does not have an extension!");
+            };
+            if extension == "jxb" {
+                extract::build_jxb_file(in_path, out_path)
+                    .await
+                    .expect("Error building jxb file!");
+            } else if extension == "jxk" {
+                extract::build_jxk_file(in_path, out_path)
+                    .await
+                    .expect("Error building jxk file!");
+            } else {
+                panic!("Unsupported extension!");
+            }
+            eprintln!("Built file.");
         }
     }
+    let elapsed = now.elapsed();
+    eprintln!("Time elapsed: {} seconds.", elapsed.as_secs_f32());
 }

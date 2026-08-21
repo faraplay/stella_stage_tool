@@ -1,21 +1,19 @@
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, HashSet},
-    io::Cursor,
+    io::{Cursor, SeekFrom::Start},
     path::Path,
 };
 
-use binrw::{
-    BinRead, BinResult, binread,
-    helpers::{args_iter, until_exclusive, until_exclusive_with, until_with},
-};
-use indexmap::IndexMap;
-use quick_xml::{Writer, events::BytesText};
+use binrw::{BinRead, BinResult, BinWrite, binread, binwrite};
+use quick_xml::Writer;
 use tokio::{
     fs::{File, create_dir, metadata, read_dir},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWrite},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, copy},
     task::JoinSet,
 };
+
+use self::jxb::Jxb;
+
+mod jxb;
 
 /// Extract all files in a directory. Searches the directory recursively.
 pub async fn extract_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
@@ -114,25 +112,15 @@ pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
     drop(root_node);
 
     for metadata in jxk.file_metadatas {
-        let node = jxk.jxb.get_node(metadata.node_index)?;
-        if node.node_type != "file" {
+        let node_data = jxk.jxb.get_node_data(metadata.node_index)?;
+        if node_data.get_type() != "file" {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "jxk file metadata links to non-file node!",
             )
             .into());
         }
-        let JxbValue::Text(file_name) = node.tags.get("name").ok_or(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "File node is missing name tag!",
-        ))?
-        else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "File node has name tag but it is not a string!",
-            )
-            .into());
-        };
+        let file_name = node_data.get_text_tag("name")?;
         let mut file_writer = File::create(out_path.join(file_name)).await?;
         reader
             .seek(std::io::SeekFrom::Start(metadata.data_offset as u64))
@@ -160,15 +148,43 @@ pub async fn extract_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
     Ok(())
 }
 
+pub async fn build_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+    let info_path = in_path.join("info.xml");
+    let info_reader = BufReader::new(File::open(info_path).await?);
+    let mut xml_reader = quick_xml::Reader::from_reader(info_reader);
+    let jxb = Jxb::from_xml(&mut xml_reader).await?;
+    let mut jxk = Jxk::new(jxb)?;
+    let mut writer = File::create(out_path).await?;
+    jxk.add_files_and_write(in_path, &mut writer).await?;
+
+    Ok(())
+}
+
+pub async fn build_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+    let reader = BufReader::new(File::open(in_path).await?);
+    let mut xml_reader = quick_xml::Reader::from_reader(reader);
+    let jxb = Jxb::from_xml(&mut xml_reader).await?;
+
+    let buffer = Vec::new();
+    let mut cursor = Cursor::new(buffer);
+    jxb.write_le(&mut cursor)?;
+    let mut writer = File::create(out_path).await?;
+    writer.write_all(&cursor.into_inner()).await?;
+    Ok(())
+}
+
 #[binread]
+#[binwrite]
 #[br(little)]
 #[br(stream = reader)]
 #[derive(Debug)]
 struct Jxk {
-    #[br(magic = b"JXK\0")]
+    #[brw(magic = b"JXK\0")]
     #[br(temp)]
+    #[bw(calc(file_metadatas.len() as i32))]
     file_count: i32,
-    #[br(magic = b"\0\0\0\0")]
+
+    #[brw(magic = b"\0\0\0\0")]
     #[br(args { count: file_count as usize })]
     #[br(assert(
         file_metadatas.windows(2).all(
@@ -191,6 +207,7 @@ struct Jxk {
         other_bytes.is_none(),
         "Stream is not at end of file after reading jxb!",
     ))]
+    #[bw(ignore)]
     other_bytes: Option<u8>,
 
     #[br(align_before = 0x10)]
@@ -202,418 +219,75 @@ struct Jxk {
         "Unexpected stream position {:#X}",
         end_pos,
     ))]
+    #[bw(ignore)]
     end_pos: u64,
 }
 
+impl Jxk {
+    /// Create a new Jxk from a Jxb.
+    /// Note that the file offsets and sizes are set to zero and need to be filled in.
+    pub fn new(jxb: Jxb) -> std::io::Result<Jxk> {
+        let node_list = jxb.node_list()?;
+        let file_metadatas: Vec<FileMetadata> = node_list
+            .iter()
+            .enumerate()
+            .filter(|(_, node_data)| node_data.get_type() == "file")
+            .map(|(index, _)| FileMetadata {
+                node_index: index as i32,
+                data_offset: 0,
+                data_size: 0,
+            })
+            .collect();
+        Ok(Jxk {
+            file_metadatas,
+            jxb,
+        })
+    }
+    pub async fn add_files_and_write(
+        &mut self,
+        dir_path: &Path,
+        writer: &mut (impl AsyncWriteExt + AsyncSeekExt + Unpin),
+    ) -> BinResult<()> {
+        writer
+            .write_all(&vec![0u8; crate::size::get_size(self)])
+            .await?;
+        for file_metadata in self.file_metadatas.iter_mut() {
+            let old_offset = writer.stream_position().await?;
+            let offset = old_offset.next_multiple_of(0x10);
+            writer
+                .write_all(&vec![0u8; (offset - old_offset) as usize])
+                .await?;
+
+            let node_data = self.jxb.get_node_data(file_metadata.node_index)?;
+            if node_data.get_type() != "file" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "jxk file metadata links to non-file node!",
+                )
+                .into());
+            }
+            let file_name = node_data.get_text_tag("name")?;
+            let mut reader = File::open(dir_path.join(file_name)).await?;
+            let size = copy(&mut reader, writer).await?;
+            file_metadata.data_offset = offset as i32;
+            file_metadata.data_size = size as i32;
+        }
+        writer.seek(Start(0)).await?;
+        let buffer = Vec::new();
+        let mut cursor = Cursor::new(buffer);
+        self.write_le(&mut cursor)?;
+        writer.write_all(&cursor.into_inner()).await?;
+
+        Ok(())
+    }
+}
+
 #[binread]
-#[br(little)]
+#[binwrite]
+#[brw(little)]
 #[derive(Debug)]
 struct FileMetadata {
     node_index: i32,
     data_offset: i32,
     data_size: i32,
-}
-
-#[binread]
-#[br(little)]
-#[br(stream = reader)]
-#[derive(Debug)]
-struct Jxb {
-    #[br(align_before = 0x10)]
-    #[br(temp)]
-    #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
-    start_pos: i32,
-    #[br(magic = b"JXB\0\x01\x00\x01")]
-    #[br(assert(uses_utf16 == 1 || uses_utf16 == 2))]
-    uses_utf16: u8,
-    #[br(temp)]
-    #[br(assert(node_count != 0))]
-    node_count: u32,
-    #[br(temp)]
-    key_string_count: u32,
-    #[br(temp)]
-    #[br(map(|offset: i32| start_pos + offset))]
-    b_region_pos: i32,
-    #[br(temp)]
-    #[br(map(|relative_offset: i32| start_pos + relative_offset))]
-    key_string_offset_region_pos: i32,
-    #[br(magic = b"\0\0\0\0")]
-    #[br(temp)]
-    #[br(map(|relative_offset: i32| start_pos + relative_offset))]
-    string_region_pos: i32,
-
-    #[br(magic = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0")] // 0x10 zero bytes
-    #[br(temp)]
-    #[br(args { count: node_count as usize })]
-    #[br(assert(
-        reader.stream_position().map_or(false, |pos| pos == b_region_pos as u64),
-        "incorrect stream position for b_region_pos, expected {:X}",
-        b_region_pos,
-    ))]
-    node_data_as: Vec<JxbNodeDataA>,
-
-    #[br(parse_with = args_iter(
-        node_data_as.iter().map(
-            |a| (b_region_pos + a.b_offset, a.tags_type_id, a.tag_count)
-        )
-    ))]
-    node_data_bs: Vec<JxbNodeDataB>,
-
-    #[br(temp)]
-    #[br(align_after = 0x10)]
-    #[br(try_calc(
-        {
-            let mut child_index = 1;
-            node_data_bs.iter().enumerate().map(|(parent_index, b)| {
-                if b.child_count == 0 {
-                    if b.children_start_index != -1 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("node {:X} has no children but children_start_index is not -1", parent_index),
-                        ));
-                    } else {
-                        return Ok(());
-                    }
-                }
-                if b.children_start_index != child_index {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "node {:X} has children_start_index {:X}, expected {:X}",
-                            parent_index,
-                            b.children_start_index,
-                            child_index,
-                        ),
-                    ));
-                }
-                child_index = b.children_start_index + b.child_count;
-                for index in b.children_start_index..b.children_start_index + b.child_count {
-                    if node_data_as[index as usize].parent_index as usize != parent_index {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("node {:X} has incorrect parent index", index),
-                        ));
-                    }
-                }
-                Ok(())
-            }).collect::<std::io::Result<()>>()
-        }
-    ))]
-    #[br(assert(
-        reader.stream_position().map_or(false, |pos| pos == key_string_offset_region_pos as u64),
-        "incorrect stream position for key_string_offset_region_pos, expected {:X}",
-        key_string_offset_region_pos,
-    ))]
-    assertion1: (),
-
-    #[br(args { count: key_string_count as usize })]
-    #[br(align_after = 0x10)]
-    #[br(assert(
-        reader.stream_position().map_or(false, |pos| pos == string_region_pos as u64),
-        "incorrect stream position for string_region_pos, expected {:X}",
-        string_region_pos,
-    ))]
-    #[br(assert(
-        key_string_offsets.windows(2).all(
-            |window| window[0] < window[1]
-        ),
-        "key string offsets are not in ascending order",
-    ))]
-    key_string_offsets: Vec<i32>,
-
-    #[br(temp)]
-    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).min().unwrap())]
-    #[br(assert(
-        node_data_bs.iter().all(
-            |b| b.child_count == 0 || b.text_offset == node_text_offset_min
-        ),
-        "Some node has both text content and child nodes!"
-    ))]
-    node_text_offset_min: i32,
-    #[br(temp)]
-    #[br(calc = node_data_bs.iter().map(|b| b.text_offset).max().unwrap())]
-    #[br(assert(
-        if uses_utf16 == 1 { node_text_offset_min == node_text_offset_max } else { true }
-    ))]
-    node_text_offset_max: i32,
-
-    #[br(parse_with = until_exclusive_with(
-        |(_, text): &(i32, String)| text.is_empty(),
-        |reader, options, _: ()| {
-            let string = JxbUtf8String::read_options(reader, options, ())?;
-            Ok((string.pos - string_region_pos, string.text))
-        }
-    ))]
-    #[br(pad_after(if uses_utf16 == 1 { 0 } else { -1 }))]
-    utf8_strings: BTreeMap<i32, String>,
-
-    #[br(if(
-        uses_utf16 == 2,
-        BTreeMap::from_iter(
-            std::iter::once(
-                (node_text_offset_max, String::new())
-            )
-        ),
-    ))]
-    #[br(parse_with = until_with(
-        |(offset, _): &(i32, String)| *offset >= node_text_offset_max,
-        |reader, options, _: ()| {
-            let string = JxbUtf16String::read_options(reader, options, ())?;
-            Ok((string.pos - string_region_pos, string.text))
-        }
-    ))]
-    #[br(assert(
-        utf16_strings.first_entry().is_none_or(|entry|entry.get().is_empty()),
-        "the first utf16 string is not the empty string, it is {}",
-        utf16_strings.first_key_value().unwrap().1,
-    ))]
-    utf16_strings: BTreeMap<i32, String>,
-}
-
-#[binread]
-#[br(little)]
-#[derive(Debug)]
-struct JxbNodeDataA {
-    #[br(magic = b"\x03\0")]
-    tags_type_id: u16,
-    tag_count: u32,
-    b_offset: i32,
-    parent_index: i32,
-}
-
-#[binread]
-#[br(little)]
-#[br(stream = reader)]
-#[br(import(expected_offset: i32, tags_type_id: u16, extra_count: u32))]
-#[br(pre_assert(
-    reader.stream_position().map_or(false, |pos| pos == expected_offset as u64),
-    "incorrect stream position for NodeDataB item, expected {:X}",
-    expected_offset,
-))]
-#[derive(Debug)]
-struct JxbNodeDataB {
-    node_type_offset: i32,
-    children_start_index: i32,
-    child_count: i32,
-    text_offset: i32,
-
-    #[br(args { count: extra_count as usize, inner: (tags_type_id,) })]
-    tags: Vec<JxbTag>,
-
-    #[br(temp)]
-    #[br(try_calc(
-        (||{
-            match tags_type_id {
-                0 => if !tags.is_empty() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "tags_type_id is 0 but there are tags present",
-                    ));
-                },
-                1 => if tags.iter().map(|tag| tag.type_id).collect::<HashSet<_>>().len() <= 1 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "tags_type_id is 1 but all tags present have the same type_id",
-                    ));
-                },
-                _ => if tags.is_empty() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "tags_type_id is not 0 but there are no tags present",
-                    ));
-                },
-            };
-            let mut key_offsets = HashSet::new();
-            for tag in &tags {
-                if !key_offsets.insert(tag.key_offset) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Duplicate tag key offset {}", tag.key_offset),
-                    ));
-                }
-            }
-            return Ok(());
-        })()
-    ))]
-    assertion1: (),
-}
-
-#[binread]
-#[br(little)]
-#[br(import(tags_type_id: u16))]
-#[derive(Debug)]
-struct JxbTag {
-    key_offset: i32,
-    #[br(if(tags_type_id == 1, tags_type_id as u32))]
-    type_id: u32,
-    value: i32,
-}
-
-#[binread]
-#[br(little)]
-#[br(stream = reader)]
-#[derive(Debug)]
-struct JxbUtf8String {
-    #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
-    pos: i32,
-    #[br(temp)]
-    #[br(parse_with = until_exclusive(|&value| value == 0))]
-    utf8_values: Vec<u8>,
-    #[br(try_calc(String::from_utf8(utf8_values)))]
-    text: String,
-}
-
-#[binread]
-#[br(little)]
-#[br(stream = reader)]
-#[derive(Debug)]
-struct JxbUtf16String {
-    #[br(try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
-    pos: i32,
-    #[br(temp)]
-    #[br(parse_with = until_exclusive(|&value| value == 0))]
-    utf16_values: Vec<u16>,
-    #[br(try_calc(String::from_utf16(&utf16_values)))]
-    text: String,
-}
-
-impl<'a> Jxb {
-    fn get_node(&'a self, index: i32) -> std::io::Result<JxbNode<'a>> {
-        JxbNode::new(
-            index,
-            &self.node_data_bs,
-            &self.utf8_strings,
-            &self.utf16_strings,
-        )
-    }
-    fn root_node(&'a self) -> std::io::Result<JxbNode<'a>> {
-        self.get_node(0)
-    }
-}
-
-#[derive(Debug)]
-struct JxbNode<'a> {
-    node_type: &'a str,
-    tags: IndexMap<&'a str, JxbValue<'a>>,
-    text: &'a str,
-    children: Vec<JxbNode<'a>>,
-}
-
-impl<'a> JxbNode<'a> {
-    fn new(
-        index: i32,
-        node_data_bs: &'a [JxbNodeDataB],
-        utf8_strings: &'a BTreeMap<i32, String>,
-        utf16_strings: &'a BTreeMap<i32, String>,
-    ) -> std::io::Result<JxbNode<'a>> {
-        let b = &node_data_bs[index as usize];
-        Ok(JxbNode {
-            node_type: get_string(b.node_type_offset, utf8_strings)?,
-            tags: b
-                .tags
-                .iter()
-                .map(|b_tag| {
-                    Ok((
-                        get_string(b_tag.key_offset, utf8_strings)?,
-                        JxbValue::new(b_tag, utf8_strings)?,
-                    ))
-                })
-                .collect::<std::io::Result<_>>()?,
-            text: get_string(b.text_offset, utf16_strings)?,
-            children: (b.children_start_index..b.children_start_index + b.child_count)
-                .map(|child_index| {
-                    JxbNode::new(child_index, node_data_bs, utf8_strings, utf16_strings)
-                })
-                .collect::<std::io::Result<_>>()?,
-        })
-    }
-
-    async fn write_xml<W>(&self, writer: &mut Writer<W>) -> quick_xml::Result<()>
-    where
-        W: AsyncWrite + Unpin,
-    {
-        let element_writer = writer.create_element(self.node_type).with_attributes(
-            self.tags
-                .iter()
-                .map(|(key, value)| (*key, value.to_string())),
-        );
-        if !self.text.is_empty() {
-            element_writer
-                .write_text_content_async(BytesText::new(self.text))
-                .await?;
-            return Ok(());
-        }
-        if !self.children.is_empty() {
-            Box::pin(
-                element_writer.write_inner_content_async::<_, _, quick_xml::Error>(
-                    |writer| async {
-                        for child_node in &self.children {
-                            child_node.write_xml(writer).await?;
-                        }
-                        Ok(writer)
-                    },
-                ),
-            )
-            .await?;
-            return Ok(());
-        }
-        element_writer.write_empty_async().await?;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-enum JxbValue<'a> {
-    Text(&'a str),
-    Float(f32),
-    Int(i32),
-    Bool(bool),
-}
-
-fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&str> {
-    match strings.get(&offset) {
-        Some(value) => Ok(value),
-        None => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Could not find string at {:#X}", offset),
-        )),
-    }
-}
-
-impl<'a> JxbValue<'a> {
-    fn new(b_tag: &JxbTag, strings: &'a BTreeMap<i32, String>) -> std::io::Result<JxbValue<'a>> {
-        Ok(match b_tag.type_id {
-            3 => JxbValue::Text(get_string(b_tag.value, strings)?),
-            4 => JxbValue::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
-            5 => JxbValue::Int(b_tag.value),
-            6 => JxbValue::Bool(match b_tag.value {
-                0 => false,
-                1 => true,
-                _ => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Invalid boolean value {:#X}!", b_tag.value),
-                    ));
-                }
-            }),
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Invalid tag type! type_id: {:#X}, value: {:#X}",
-                        b_tag.type_id, b_tag.value
-                    ),
-                ));
-            }
-        })
-    }
-
-    fn to_string(&'a self) -> Cow<'a, str> {
-        match self {
-            JxbValue::Text(text) => Cow::Borrowed(*text),
-            JxbValue::Float(value) => Cow::Owned(value.to_string()),
-            JxbValue::Int(value) => Cow::Owned(value.to_string()),
-            JxbValue::Bool(value) => Cow::Owned(value.to_string()),
-        }
-    }
 }

@@ -182,7 +182,7 @@ async fn encrypt_stream(
     reader.read_to_end(&mut in_data).await?;
 
     let mut header = [0u8; 0x400];
-    header[0..0x4].copy_from_slice(&in_data[0..0x4]);
+    header[0..0x4].copy_from_slice(b"MZNC");
     let iv_seed = 0;
     header[0x24..0x28].copy_from_slice(&(iv_seed as u32).to_le_bytes());
     let decompressed_file_size = in_data.len();

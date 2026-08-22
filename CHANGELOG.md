@@ -1,3 +1,10 @@
+# Version 0.3.1
+
+Changed:
+
+- `encrypt` command now produces files with the correct checksum, meaning the game can now read it correctly
+- `decrypt` command now checks the file checksum
+
 # Version 0.3.0
 
 Added:

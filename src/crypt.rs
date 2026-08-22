@@ -172,10 +172,13 @@ async fn decrypt_stream(
 
     in_data[0x24..0x28].copy_from_slice(&[0, 0, 0, 0]);
     let calculated_crc32 = get_crc32(&in_data);
-    assert_eq!(crc32, calculated_crc32);
+    assert_eq!(crc32, calculated_crc32, "Incorrect CRC32 checksum!");
 
     let out_file_size = decompress(&in_data[0x30..], writer).await?;
-    assert_eq!(decompressed_file_size, out_file_size);
+    assert_eq!(
+        decompressed_file_size, out_file_size,
+        "Incorrect decompressed file size!"
+    );
     Ok(())
 }
 
@@ -192,30 +195,27 @@ async fn encrypt_stream(
     let mut in_data = Vec::new();
     reader.read_to_end(&mut in_data).await?;
 
-    let mut header = [0u8; 0x400];
-    header[0..0x4].copy_from_slice(b"MZNC");
-    let crc32: u32 = 0;
-    header[0x24..0x28].copy_from_slice(&crc32.to_le_bytes());
+    let mut buffer = vec![0u8; 0x30];
+    buffer[0..0x4].copy_from_slice(b"MZNC");
     let decompressed_file_size = in_data.len();
-    header[0x28..0x2c].copy_from_slice(&(decompressed_file_size as u32).to_le_bytes());
+    buffer[0x28..0x2c].copy_from_slice(&(decompressed_file_size as u32).to_le_bytes());
 
-    let mut buffer = Vec::new();
     compress(&in_data, &mut buffer, small)?;
     drop(in_data);
 
     let compressed_data_size = buffer.len().next_multiple_of(16);
     buffer.resize(compressed_data_size, 0);
-    let out_file_size = (buffer.len() + 0x30) as u64;
+    let out_file_size = buffer.len() as u64;
+    let crc32: u32 = get_crc32(&buffer);
+    buffer[0x24..0x28].copy_from_slice(&crc32.to_le_bytes());
     let aes_key = get_aes_key(out_file_size);
     let aes_iv = get_iv(crc32.into());
-    encrypt(&aes_key, &aes_iv, &mut buffer)?;
+    encrypt(&aes_key, &aes_iv, &mut buffer[0x30..])?;
 
     let kb_buffer_size = std::cmp::min(out_file_size, 0x400) as usize;
-    header[0x30..kb_buffer_size].copy_from_slice(&buffer[..kb_buffer_size - 0x30]);
-    decrypt_first_kb(&mut header[..kb_buffer_size], out_file_size)?;
+    decrypt_first_kb(&mut buffer[..kb_buffer_size], out_file_size)?;
 
-    writer.write_all(&header[..kb_buffer_size]).await?;
-    writer.write_all(&buffer[kb_buffer_size - 0x30..]).await?;
+    writer.write_all(&buffer).await?;
     Ok(())
 }
 

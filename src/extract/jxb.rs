@@ -145,12 +145,7 @@ pub struct Jxb {
     ))]
     key_string_offsets: Vec<i32>,
 
-    #[br(temp, calc(node_data_bs.iter().flat_map(|b| {
-        match b {
-            NodeDataB::Version1{tags} => &tags.tags,
-            NodeDataB::Version3{tags, ..} => &tags.tags,
-        }
-    }).flat_map(|tag| {
+    #[br(temp, calc(node_data_bs.iter().flat_map(|b| b.tags()).flat_map(|tag| {
         std::iter::once(tag.key_offset).chain(if tag.type_id == 3 {
             Some(tag.value)
         } else {
@@ -176,19 +171,19 @@ pub struct Jxb {
     #[br(temp, calc(
         if let Some(node_text_offset_min) = node_text_offset_min {
             if uses_utf16 == 1 {
-                string_region_pos + node_text_offset_min + 1
+                node_text_offset_min + 1
             } else {
-                string_region_pos + node_text_offset_min
+                node_text_offset_min
             }
         } else {
             key_value_offset_max + 1
         }
     ))]
     #[bw(ignore)]
-    utf8_region_end_pos: i32,
+    utf8_region_end_offset: i32,
 
     #[brw(align_before = 0x10)]
-    #[br(args(uses_utf16, utf8_region_end_pos, node_text_offset_max.unwrap_or(0)))]
+    #[br(args(uses_utf16, utf8_region_end_offset, node_text_offset_max.unwrap_or(0)))]
     string_pool: StringPool,
 }
 
@@ -213,7 +208,26 @@ enum NodeDataB {
     #[br(assert(node_version == 1))]
     Version1 {
         #[br(args(tags_type_id, tag_count))]
+        #[br(assert({
+            let child_indexes = tags.tags.iter()
+                .filter(|tag| tag.type_id == 2)
+                .map(|tag| tag.value)
+                .collect::<Vec<_>>();
+            child_indexes.windows(2).all(
+                |window| window[1] == window[0] + 1
+            )
+        }))]
         tags: TagDatas,
+    },
+    #[br(assert(node_version == 2))]
+    Version2 {
+        #[br(args{ count: tag_count as usize })]
+        #[br(assert(
+            child_indexes.windows(2).all(
+                |window| window[1] == window[0] + 1
+            )
+        ))]
+        child_indexes: Vec<i32>,
     },
     #[br(assert(node_version == 3))]
     Version3 {
@@ -227,6 +241,43 @@ enum NodeDataB {
     },
 }
 
+impl NodeDataB {
+    fn tags(&self) -> &Vec<TagData> {
+        match self {
+            NodeDataB::Version1 { tags } => &tags.tags,
+            NodeDataB::Version2 { .. } => &EMPTY_TAG_DATA_VEC,
+            NodeDataB::Version3 { tags, .. } => &tags.tags,
+        }
+    }
+
+    fn children_start_index(&self) -> i32 {
+        match self {
+            NodeDataB::Version1 { tags } => tags
+                .tags
+                .iter()
+                .filter(|tag| tag.type_id == 2)
+                .map(|tag| tag.value)
+                .min()
+                .unwrap_or(-1),
+            NodeDataB::Version2 { child_indexes } => child_indexes.first().copied().unwrap_or(-1),
+            NodeDataB::Version3 {
+                children_start_index,
+                ..
+            } => *children_start_index,
+        }
+    }
+
+    fn child_count(&self) -> i32 {
+        match self {
+            NodeDataB::Version1 { tags } => {
+                tags.tags.iter().filter(|tag| tag.type_id == 2).count() as i32
+            }
+            NodeDataB::Version2 { child_indexes } => child_indexes.len() as i32,
+            NodeDataB::Version3 { child_count, .. } => *child_count,
+        }
+    }
+}
+
 #[binread]
 #[binwrite]
 #[brw(little)]
@@ -237,6 +288,8 @@ struct TagDatas {
     #[bw(args (self.tag_type_id()))]
     tags: Vec<TagData>,
 }
+
+static EMPTY_TAG_DATA_VEC: Vec<TagData> = Vec::new();
 
 impl TagDatas {
     fn tag_type_id(&self) -> u16 {
@@ -271,7 +324,7 @@ struct TagData {
 #[binwrite]
 #[brw(little)]
 #[br(stream = reader)]
-#[br(import(uses_utf16: u8, utf8_region_end_pos: i32, node_text_offset_max: i32))]
+#[br(import(uses_utf16: u8, utf8_region_end_offset: i32, node_text_offset_max: i32))]
 #[derive(Debug)]
 struct StringPool {
     // store current stream position when reading starts
@@ -282,7 +335,7 @@ struct StringPool {
     #[br(temp)]
     #[br(parse_with = until(
         |string: &StringData<u8>|
-    string.pos + string.data.len() as i32 + 1 >= utf8_region_end_pos
+    string.pos + string.data.len() as i32 + 1 >= start_pos + utf8_region_end_offset
     ))]
     #[bw(calc(utf8_strings.iter().map(|(_, text)|
     StringData{ pos: 0, data: text.bytes().collect() }

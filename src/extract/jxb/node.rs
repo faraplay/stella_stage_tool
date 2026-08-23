@@ -48,24 +48,24 @@ impl<'a> NodeData<'a> {
             .unwrap_or(key_value_strings);
         let node_type = Cow::Borrowed(match b {
             NodeDataB::Version1 { .. } => "",
+            NodeDataB::Version2 { .. } => "",
             NodeDataB::Version3 {
                 node_type_offset, ..
             } => get_string(*node_type_offset, key_value_strings)?,
         });
-        let tags = match b {
-            NodeDataB::Version1 { tags } => &tags.tags,
-            NodeDataB::Version3 { tags, .. } => &tags.tags,
-        }
-        .iter()
-        .map(|tag| {
-            Ok((
-                Cow::Borrowed(get_string(tag.key_offset, key_value_strings)?),
-                Value::new(tag, key_value_strings)?,
-            ))
-        })
-        .collect::<std::io::Result<_>>()?;
+        let tags = b
+            .tags()
+            .iter()
+            .map(|tag| {
+                Ok((
+                    Cow::Borrowed(get_string(tag.key_offset, key_value_strings)?),
+                    Value::new(tag, key_value_strings)?,
+                ))
+            })
+            .collect::<std::io::Result<_>>()?;
         let text = Cow::Borrowed(match b {
             NodeDataB::Version1 { .. } => "",
+            NodeDataB::Version2 { .. } => "",
             NodeDataB::Version3 { text_offset, .. } => get_string(*text_offset, text_strings)?,
         });
         Ok(NodeData {
@@ -100,23 +100,11 @@ impl<'a> NodeDataWithPointers<'a> {
         b: &'a NodeDataB,
         string_pool: &'a StringPool,
     ) -> std::io::Result<NodeDataWithPointers<'a>> {
-        Ok(match b {
-            NodeDataB::Version1 { .. } => NodeDataWithPointers {
-                data: NodeData::new(b, string_pool)?,
-                parent_index: a.parent_index,
-                children_start_index: -1,
-                child_count: 0,
-            },
-            NodeDataB::Version3 {
-                children_start_index,
-                child_count,
-                ..
-            } => NodeDataWithPointers {
-                data: NodeData::new(b, string_pool)?,
-                parent_index: a.parent_index,
-                children_start_index: *children_start_index,
-                child_count: *child_count,
-            },
+        Ok(NodeDataWithPointers {
+            data: NodeData::new(b, string_pool)?,
+            parent_index: a.parent_index,
+            children_start_index: b.children_start_index(),
+            child_count: b.child_count(),
         })
     }
 
@@ -177,16 +165,30 @@ impl<'a> NodeDataWithPointers<'a> {
             let tags_type_id = tags.tag_type_id();
             let a: NodeDataA;
             let b: NodeDataB;
-            if node.data.node_type.is_empty() && node.data.text.is_empty() && node.child_count == 0
-            {
-                a = NodeDataA {
-                    node_version: 1,
-                    tags_type_id,
-                    tag_count: tags.tags.len() as u32,
-                    b_offset,
-                    parent_index: node.parent_index,
-                };
-                b = NodeDataB::Version1 { tags };
+            if node.data.node_type.is_empty() && node.data.text.is_empty() {
+                if tags.tags.is_empty() {
+                    a = NodeDataA {
+                        node_version: 2,
+                        tags_type_id: 2,
+                        tag_count: node.child_count as u32,
+                        b_offset: node.children_start_index,
+                        parent_index: node.parent_index,
+                    };
+                    b = NodeDataB::Version2 {
+                        child_indexes: (node.children_start_index
+                            ..node.children_start_index + node.child_count)
+                            .collect(),
+                    };
+                } else {
+                    a = NodeDataA {
+                        node_version: 1,
+                        tags_type_id,
+                        tag_count: tags.tags.len() as u32,
+                        b_offset,
+                        parent_index: node.parent_index,
+                    };
+                    b = NodeDataB::Version1 { tags };
+                }
             } else {
                 a = NodeDataA {
                     node_version: 3,
@@ -441,6 +443,7 @@ fn to_tags<'a>(attributes: Attributes) -> quick_xml::Result<IndexMap<Cow<'a, str
 
 #[derive(Debug)]
 pub enum Value<'a> {
+    Node(i32),
     Text(Cow<'a, str>),
     Float(f32),
     Int(i32),
@@ -460,6 +463,7 @@ fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&
 impl<'a> Value<'a> {
     fn new(b_tag: &TagData, strings: &'a BTreeMap<i32, String>) -> std::io::Result<Value<'a>> {
         Ok(match b_tag.type_id {
+            2 => Value::Node(b_tag.value),
             3 => Value::Text(Cow::Borrowed(get_string(b_tag.value, strings)?)),
             4 => Value::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
             5 => Value::Int(b_tag.value),
@@ -492,6 +496,11 @@ impl<'a> Value<'a> {
         if string == "false" {
             return Value::Bool(false);
         }
+        if let Some(suffix) = string.strip_prefix("NODE")
+            && let Ok(value) = suffix.parse::<i32>()
+        {
+            return Value::Node(value);
+        }
         if let Ok(value) = string.parse::<i32>() {
             return Value::Int(value);
         }
@@ -503,6 +512,7 @@ impl<'a> Value<'a> {
 
     fn to_i32(&self, offset_lookup: &HashMap<&str, i32>) -> Option<i32> {
         match self {
+            Value::Node(value) => Some(*value),
             Value::Text(text) => offset_lookup.get(text as &str).copied(),
             Value::Float(value) => Some(i32::from_le_bytes(value.to_le_bytes())),
             Value::Int(value) => Some(*value),
@@ -512,6 +522,7 @@ impl<'a> Value<'a> {
 
     fn type_id(&self) -> u32 {
         match self {
+            Value::Node(_) => 2,
             Value::Text(_) => 3,
             Value::Float(_) => 4,
             Value::Int(_) => 5,
@@ -521,6 +532,7 @@ impl<'a> Value<'a> {
 
     fn to_string(&'a self) -> Cow<'a, str> {
         match self {
+            Value::Node(value) => Cow::Owned(format!("NODE{value}")),
             Value::Text(text) => Cow::Borrowed(text),
             Value::Float(value) => Cow::Owned(format!("{value:.6}")),
             Value::Int(value) => Cow::Owned(value.to_string()),

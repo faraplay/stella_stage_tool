@@ -125,12 +125,15 @@ pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
             .into());
         }
         let file_name = node_data.get_text_tag("name")?;
-        let mut file_writer = File::create(out_path.join(file_name)).await?;
+        let trimmed_name_start_index = file_name.rfind('\\').map_or(0, |i| i + 1);
+        let trimmed_name = &file_name[trimmed_name_start_index..];
+        let mut file_writer = File::create(out_path.join(trimmed_name)).await?;
         reader
             .seek(std::io::SeekFrom::Start(metadata.data_offset as u64))
             .await?;
         let mut short_reader = reader.take(metadata.data_size as u64);
         tokio::io::copy(&mut short_reader, &mut file_writer).await?;
+        drop(file_writer);
         reader = short_reader.into_inner();
     }
     Ok(())
@@ -271,7 +274,9 @@ impl Jxk {
                 .into());
             }
             let file_name = node_data.get_text_tag("name")?;
-            let mut reader = File::open(dir_path.join(file_name)).await?;
+            let trimmed_name_start_index = file_name.rfind('\\').map_or(0, |i| i + 1);
+            let trimmed_name = &file_name[trimmed_name_start_index..];
+            let mut reader = File::open(dir_path.join(trimmed_name)).await?;
             let size = copy(&mut reader, writer).await?;
             file_metadata.data_offset = offset as i32;
             file_metadata.data_size = size as i32;

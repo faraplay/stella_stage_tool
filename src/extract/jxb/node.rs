@@ -46,19 +46,28 @@ impl<'a> NodeData<'a> {
             .utf16_strings
             .as_ref()
             .unwrap_or(key_value_strings);
-        let node_type = Cow::Borrowed(get_string(b.node_type_offset, key_value_strings)?);
-        let tags = b
-            .tags
-            .tags
-            .iter()
-            .map(|tag| {
-                Ok((
-                    Cow::Borrowed(get_string(tag.key_offset, key_value_strings)?),
-                    Value::new(tag, key_value_strings)?,
-                ))
-            })
-            .collect::<std::io::Result<_>>()?;
-        let text = Cow::Borrowed(get_string(b.text_offset, text_strings)?);
+        let node_type = Cow::Borrowed(match b {
+            NodeDataB::Version1 { .. } => "",
+            NodeDataB::Version3 {
+                node_type_offset, ..
+            } => get_string(*node_type_offset, key_value_strings)?,
+        });
+        let tags = match b {
+            NodeDataB::Version1 { tags } => &tags.tags,
+            NodeDataB::Version3 { tags, .. } => &tags.tags,
+        }
+        .iter()
+        .map(|tag| {
+            Ok((
+                Cow::Borrowed(get_string(tag.key_offset, key_value_strings)?),
+                Value::new(tag, key_value_strings)?,
+            ))
+        })
+        .collect::<std::io::Result<_>>()?;
+        let text = Cow::Borrowed(match b {
+            NodeDataB::Version1 { .. } => "",
+            NodeDataB::Version3 { text_offset, .. } => get_string(*text_offset, text_strings)?,
+        });
         Ok(NodeData {
             node_type,
             tags,
@@ -91,11 +100,23 @@ impl<'a> NodeDataWithPointers<'a> {
         b: &'a NodeDataB,
         string_pool: &'a StringPool,
     ) -> std::io::Result<NodeDataWithPointers<'a>> {
-        Ok(NodeDataWithPointers {
-            data: NodeData::new(b, string_pool)?,
-            parent_index: a.parent_index,
-            children_start_index: b.children_start_index,
-            child_count: b.child_count,
+        Ok(match b {
+            NodeDataB::Version1 { .. } => NodeDataWithPointers {
+                data: NodeData::new(b, string_pool)?,
+                parent_index: a.parent_index,
+                children_start_index: -1,
+                child_count: 0,
+            },
+            NodeDataB::Version3 {
+                children_start_index,
+                child_count,
+                ..
+            } => NodeDataWithPointers {
+                data: NodeData::new(b, string_pool)?,
+                parent_index: a.parent_index,
+                children_start_index: *children_start_index,
+                child_count: *child_count,
+            },
         })
     }
 
@@ -154,21 +175,36 @@ impl<'a> NodeDataWithPointers<'a> {
                     .collect(),
             };
             let tags_type_id = tags.tag_type_id();
-            let a = NodeDataA {
-                tags_type_id,
-                tag_count: tags.tags.len() as u32,
-                b_offset,
-                parent_index: node.parent_index,
-            };
-            let b = NodeDataB {
-                node_type_offset: *utf8_offset_lookup
-                    .get(&node.data.node_type as &str)
-                    .unwrap(),
-                children_start_index: node.children_start_index,
-                child_count: node.child_count,
-                text_offset: *utf16_offset_lookup.get(&node.data.text as &str).unwrap(),
-                tags,
-            };
+            let a: NodeDataA;
+            let b: NodeDataB;
+            if node.data.node_type.is_empty() && node.data.text.is_empty() && node.child_count == 0
+            {
+                a = NodeDataA {
+                    node_version: 1,
+                    tags_type_id,
+                    tag_count: tags.tags.len() as u32,
+                    b_offset,
+                    parent_index: node.parent_index,
+                };
+                b = NodeDataB::Version1 { tags };
+            } else {
+                a = NodeDataA {
+                    node_version: 3,
+                    tags_type_id,
+                    tag_count: tags.tags.len() as u32,
+                    b_offset,
+                    parent_index: node.parent_index,
+                };
+                b = NodeDataB::Version3 {
+                    node_type_offset: *utf8_offset_lookup
+                        .get(&node.data.node_type as &str)
+                        .unwrap(),
+                    children_start_index: node.children_start_index,
+                    child_count: node.child_count,
+                    text_offset: *utf16_offset_lookup.get(&node.data.text as &str).unwrap(),
+                    tags,
+                };
+            }
             b_offset += get_size(&b) as i32;
             node_data_as.push(a);
             node_data_bs.push(b);

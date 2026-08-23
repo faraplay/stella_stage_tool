@@ -82,7 +82,7 @@ pub struct Jxb {
 
     #[br(parse_with = args_iter(
         node_data_as.iter().map(
-            |a| (b_region_pos + a.b_offset, a.tags_type_id, a.tag_count)
+            |a| (a.node_version, b_region_pos + a.b_offset, a.tags_type_id, a.tag_count)
         )
     ))]
     node_data_bs: Vec<NodeDataB>,
@@ -92,34 +92,36 @@ pub struct Jxb {
         {
             let mut child_index = 1;
             node_data_bs.iter().enumerate().map(|(parent_index, b)| {
-                if b.child_count == 0 {
-                    if b.children_start_index != -1 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            format!("node {:X} has no children but children_start_index is not -1", parent_index),
-                        ));
-                    } else {
-                        return Ok(());
+                if let NodeDataB::Version3{child_count, children_start_index, ..} = b {
+                    if *child_count == 0 {
+                        if *children_start_index != -1 {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("node {:X} has no children but children_start_index is not -1", parent_index),
+                            ));
+                        } else {
+                            return Ok(());
+                        }
                     }
-                }
-                if b.children_start_index != child_index {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "node {:X} has children_start_index {:X}, expected {:X}",
-                            parent_index,
-                            b.children_start_index,
-                            child_index,
-                        ),
-                    ));
-                }
-                child_index = b.children_start_index + b.child_count;
-                for index in b.children_start_index..b.children_start_index + b.child_count {
-                    if node_data_as[index as usize].parent_index as usize != parent_index {
+                    if *children_start_index != child_index {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
-                            format!("node {:X} has incorrect parent index", index),
+                            format!(
+                                "node {:X} has children_start_index {:X}, expected {:X}",
+                                parent_index,
+                                *children_start_index,
+                                child_index,
+                            ),
                         ));
+                    }
+                    child_index = *children_start_index + *child_count;
+                    for index in *children_start_index..*children_start_index + *child_count {
+                        if node_data_as[index as usize].parent_index as usize != parent_index {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("node {:X} has incorrect parent index", index),
+                            ));
+                        }
                     }
                 }
                 Ok(())
@@ -143,24 +145,50 @@ pub struct Jxb {
     ))]
     key_string_offsets: Vec<i32>,
 
-    #[br(temp, calc(node_data_bs.iter().map(|b| b.text_offset).min().unwrap()))]
-    #[br(assert(
-        node_data_bs.iter().all(
-            |b| b.child_count == 0 || b.text_offset == node_text_offset_min
-        ),
-        "Some node has both text content and child nodes!"
-    ))]
+    #[br(temp, calc(node_data_bs.iter().flat_map(|b| {
+        match b {
+            NodeDataB::Version1{tags} => &tags.tags,
+            NodeDataB::Version3{tags, ..} => &tags.tags,
+        }
+    }).flat_map(|tag| {
+        std::iter::once(tag.key_offset).chain(if tag.type_id == 3 {
+            Some(tag.value)
+        } else {
+            None
+        })
+    }).max().unwrap_or(0)))]
     #[bw(ignore)]
-    node_text_offset_min: i32,
-    #[br(temp, calc(node_data_bs.iter().map(|b| b.text_offset).max().unwrap()))]
+    key_value_offset_max: i32,
+
+    #[br(temp, calc(node_data_bs.iter().flat_map(
+        |b| if let NodeDataB::Version3{text_offset, ..} = b { Some(*text_offset) } else { None }
+    ).min()))]
+    #[bw(ignore)]
+    node_text_offset_min: Option<i32>,
+    #[br(temp, calc(node_data_bs.iter().flat_map(
+        |b| if let NodeDataB::Version3{text_offset, ..} = b { Some(*text_offset) } else { None }
+    ).max()))]
     #[br(assert(
         if uses_utf16 == 1 { node_text_offset_min == node_text_offset_max } else { true }
     ))]
     #[bw(ignore)]
-    node_text_offset_max: i32,
+    node_text_offset_max: Option<i32>,
+    #[br(temp, calc(
+        if let Some(node_text_offset_min) = node_text_offset_min {
+            if uses_utf16 == 1 {
+                string_region_pos + node_text_offset_min + 1
+            } else {
+                string_region_pos + node_text_offset_min
+            }
+        } else {
+            key_value_offset_max + 1
+        }
+    ))]
+    #[bw(ignore)]
+    utf8_region_end_pos: i32,
 
     #[brw(align_before = 0x10)]
-    #[br(args(uses_utf16, node_text_offset_min, node_text_offset_max))]
+    #[br(args(uses_utf16, utf8_region_end_pos, node_text_offset_max.unwrap_or(0)))]
     string_pool: StringPool,
 }
 
@@ -169,7 +197,7 @@ pub struct Jxb {
 #[brw(little)]
 #[derive(Debug)]
 struct NodeDataA {
-    #[brw(magic = b"\x03\0")]
+    node_version: u16,
     tags_type_id: u16,
     tag_count: u32,
     b_offset: i32,
@@ -179,22 +207,24 @@ struct NodeDataA {
 #[binread]
 #[binwrite]
 #[brw(little)]
-#[br(stream = reader)]
-#[br(import(expected_offset: i32, tags_type_id: u16, tag_count: u32))]
-#[br(pre_assert(
-    reader.stream_position().map_or(false, |pos| pos == expected_offset as u64),
-    "incorrect stream position for NodeDataB item, expected {:X}",
-    expected_offset,
-))]
+#[br(import(node_version: u16, expected_offset: i32, tags_type_id: u16, tag_count: u32))]
 #[derive(Debug)]
-struct NodeDataB {
-    node_type_offset: i32,
-    children_start_index: i32,
-    child_count: i32,
-    text_offset: i32,
+enum NodeDataB {
+    #[br(assert(node_version == 1))]
+    Version1 {
+        #[br(args(tags_type_id, tag_count))]
+        tags: TagDatas,
+    },
+    #[br(assert(node_version == 3))]
+    Version3 {
+        node_type_offset: i32,
+        children_start_index: i32,
+        child_count: i32,
+        text_offset: i32,
 
-    #[br(args(tags_type_id, tag_count))]
-    tags: TagDatas,
+        #[br(args(tags_type_id, tag_count))]
+        tags: TagDatas,
+    },
 }
 
 #[binread]
@@ -241,22 +271,13 @@ struct TagData {
 #[binwrite]
 #[brw(little)]
 #[br(stream = reader)]
-#[br(import(uses_utf16: u8, node_text_offset_min: i32, node_text_offset_max: i32))]
+#[br(import(uses_utf16: u8, utf8_region_end_pos: i32, node_text_offset_max: i32))]
 #[derive(Debug)]
 struct StringPool {
     // store current stream position when reading starts
     #[br(temp, try_calc(reader.stream_position().and_then(|pos| Ok(pos as i32))))]
     #[bw(ignore)]
     start_pos: i32,
-
-    #[br(temp, calc(
-        if uses_utf16 == 1 {
-            start_pos + node_text_offset_min + 1
-        } else {
-            start_pos + node_text_offset_min
-        }))]
-    #[bw(ignore)]
-    utf8_region_end_pos: i32,
 
     #[br(temp)]
     #[br(parse_with = until(

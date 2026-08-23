@@ -12,11 +12,8 @@ use quick_xml::{
 };
 use tokio::io::{AsyncBufRead, AsyncWrite};
 
-use super::{Jxb, TagData};
-use crate::{
-    extract::jxb::{NodeDataA, NodeDataB, StringPool},
-    size::get_size,
-};
+use super::{Jxb, NodeDataA, NodeDataB, StringPool, TagData, TagDatas};
+use crate::size::get_size;
 
 #[derive(Debug, Default)]
 pub struct NodeData<'a> {
@@ -51,6 +48,7 @@ impl<'a> NodeData<'a> {
             .unwrap_or(key_value_strings);
         let node_type = Cow::Borrowed(get_string(b.node_type_offset, key_value_strings)?);
         let tags = b
+            .tags
             .tags
             .iter()
             .map(|tag| {
@@ -143,26 +141,22 @@ impl<'a> NodeDataWithPointers<'a> {
         let mut node_data_bs = Vec::new();
         let mut b_offset = 0;
         for node in node_list {
-            let tags: Vec<_> = node
-                .data
-                .tags
-                .into_iter()
-                .map(|(key, value)| TagData {
-                    key_offset: *utf8_offset_lookup.get(&key as &str).unwrap(),
-                    type_id: value.type_id(),
-                    value: value.to_i32(&utf8_offset_lookup).unwrap(),
-                })
-                .collect();
-            let tags_type_id = if tags.is_empty() {
-                0
-            } else if tags.iter().all(|tag| tag.type_id == tags[0].type_id) {
-                tags[0].type_id as u16
-            } else {
-                1
+            let tags: TagDatas = TagDatas {
+                tags: node
+                    .data
+                    .tags
+                    .into_iter()
+                    .map(|(key, value)| TagData {
+                        key_offset: *utf8_offset_lookup.get(&key as &str).unwrap(),
+                        type_id: value.type_id(),
+                        value: value.to_i32(&utf8_offset_lookup).unwrap(),
+                    })
+                    .collect(),
             };
+            let tags_type_id = tags.tag_type_id();
             let a = NodeDataA {
                 tags_type_id,
-                tag_count: tags.len() as u32,
+                tag_count: tags.tags.len() as u32,
                 b_offset,
                 parent_index: node.parent_index,
             };

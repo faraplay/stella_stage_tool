@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    iter::zip,
-};
+use std::{collections::BTreeMap, iter::zip};
 
 use binrw::{
     BinRead, BinWrite, binread, binwrite,
@@ -196,54 +193,35 @@ struct NodeDataB {
     child_count: i32,
     text_offset: i32,
 
+    #[br(args(tags_type_id, tag_count))]
+    tags: TagDatas,
+}
+
+#[binread]
+#[binwrite]
+#[brw(little)]
+#[br(import(tags_type_id: u16, tag_count: u32))]
+#[derive(Debug)]
+struct TagDatas {
     #[br(args { count: tag_count as usize, inner: (tags_type_id,) })]
-    #[bw(args (
-        if tags.is_empty() {
+    #[bw(args (self.tag_type_id()))]
+    tags: Vec<TagData>,
+}
+
+impl TagDatas {
+    fn tag_type_id(&self) -> u16 {
+        if self.tags.is_empty() {
             0
-        } else if tags.windows(2).all(|window| window[0].type_id == window[1].type_id) {
-            tags[0].type_id as u16
+        } else if self
+            .tags
+            .windows(2)
+            .all(|window| window[0].type_id == window[1].type_id)
+        {
+            self.tags[0].type_id as u16
         } else {
             1
         }
-    ))]
-    tags: Vec<TagData>,
-
-    #[br(temp, try_calc(
-        (||{
-            match tags_type_id {
-                0 => if !tags.is_empty() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "tags_type_id is 0 but there are tags present",
-                    ));
-                },
-                1 => if tags.iter().map(|tag| tag.type_id).collect::<HashSet<_>>().len() <= 1 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "tags_type_id is 1 but all tags present have the same type_id",
-                    ));
-                },
-                _ => if tags.is_empty() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "tags_type_id is not 0 but there are no tags present",
-                    ));
-                },
-            };
-            let mut key_offsets = HashSet::new();
-            for tag in &tags {
-                if !key_offsets.insert(tag.key_offset) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Duplicate tag key offset {}", tag.key_offset),
-                    ));
-                }
-            }
-            return Ok(());
-        })()
-    ))]
-    #[bw(ignore)]
-    assertion1: (),
+    }
 }
 
 #[binread]

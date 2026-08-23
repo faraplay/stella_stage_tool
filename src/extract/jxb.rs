@@ -170,11 +170,14 @@ pub struct Jxb {
     node_text_offset_max: Option<i32>,
     #[br(temp, calc(
         if let Some(node_text_offset_min) = node_text_offset_min {
-            if uses_utf16 == 1 {
-                node_text_offset_min + 1
-            } else {
-                node_text_offset_min
-            }
+            std::cmp::max(
+                key_value_offset_max + 1,
+                if uses_utf16 == 1 {
+                    node_text_offset_min + 1
+                } else {
+                    node_text_offset_min
+                }
+            )
         } else {
             key_value_offset_max + 1
         }
@@ -333,9 +336,8 @@ struct StringPool {
     start_pos: i32,
 
     #[br(temp)]
-    #[br(parse_with = until(
-        |string: &StringData<u8>|
-    string.pos + string.data.len() as i32 + 1 >= start_pos + utf8_region_end_offset
+    #[br(parse_with = until(|string: &StringData<u8>|
+        string.pos + string.data.len() as i32 + 1 >= start_pos + utf8_region_end_offset
     ))]
     #[bw(calc(utf8_strings.iter().map(|(_, text)|
     StringData{ pos: 0, data: text.bytes().collect() }

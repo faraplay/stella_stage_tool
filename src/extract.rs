@@ -64,9 +64,11 @@ async fn extract_directory_inner(
                     match extract_jxb_file(&new_in_path, &new_out_path.with_added_extension("xml"))
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            eprintln!("Extracted {}", new_in_path.display());
+                        }
                         Err(error) => {
-                            eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                            eprintln!("Failed to extract {}: {error:?}", new_in_path.display());
                         }
                     }
                 });
@@ -74,9 +76,11 @@ async fn extract_directory_inner(
                 join_set.spawn(async move {
                     let _permit = PERMITS.acquire().await.unwrap();
                     match extract_jxk_file(&new_in_path, &&new_out_path.with_extension("")).await {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            eprintln!("Extracted {}", new_in_path.display());
+                        }
                         Err(error) => {
-                            eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                            eprintln!("Failed to extract {}: {error:?}", new_in_path.display());
                         }
                     }
                 });

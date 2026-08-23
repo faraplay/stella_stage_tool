@@ -165,30 +165,39 @@ pub struct Jxb {
     #[br(temp, calc(node_data_bs.iter().flat_map(
         |b| if let NodeDataB::Version3{text_offset, ..} = b { Some(*text_offset) } else { None }
     ).max()))]
-    #[br(assert(
-        if uses_utf16 == 1 { node_text_offset_min == node_text_offset_max } else { true }
-    ))]
     #[bw(ignore)]
     node_text_offset_max: Option<i32>,
     #[br(temp, calc(
-        if let Some(node_text_offset_min) = node_text_offset_min {
-            std::cmp::max(
-                key_value_offset_max + 1,
-                if uses_utf16 == 1 {
-                    node_text_offset_min + 1
-                } else {
-                    node_text_offset_min
-                }
-            )
+        if uses_utf16 == 1 {
+            if let Some(node_text_offset_max) = node_text_offset_max {
+                std::cmp::max(
+                    key_value_offset_max + 1,
+                    node_text_offset_max + 1
+                )
+            } else {
+                key_value_offset_max + 1
+            }
         } else {
-            key_value_offset_max + 1
+            if let Some(node_text_offset_min) = node_text_offset_min {
+                std::cmp::max(
+                    key_value_offset_max + 1,
+                    node_text_offset_min
+                )
+            } else {
+                key_value_offset_max + 1
+            }
         }
     ))]
     #[bw(ignore)]
     utf8_region_end_offset: i32,
 
     #[brw(align_before = 0x10)]
-    #[br(args(uses_utf16, utf8_region_end_offset, node_text_offset_max.unwrap_or(-1)))]
+    #[br(args(
+        uses_utf16,
+        utf8_region_end_offset,
+        node_text_offset_min.unwrap_or(-1),
+        node_text_offset_max.unwrap_or(-1),
+    ))]
     string_pool: StringPool,
 }
 
@@ -329,7 +338,12 @@ struct TagData {
 #[binwrite]
 #[brw(little)]
 #[br(stream = reader)]
-#[br(import(uses_utf16: u8, utf8_region_end_offset: i32, node_text_offset_max: i32))]
+#[br(import(
+    uses_utf16: u8,
+    utf8_region_end_offset: i32,
+    node_text_offset_min: i32,
+    node_text_offset_max: i32
+))]
 #[derive(Debug)]
 struct StringPool {
     // store current stream position when reading starts
@@ -340,7 +354,11 @@ struct StringPool {
     #[br(temp)]
     #[br(parse_with = until(|string: &StringData<u8>|{
         (string.pos + string.data.len() as i32 + 1 >= start_pos + utf8_region_end_offset)
-        && (uses_utf16 != 1 || node_text_offset_max == -1 || string.data.is_empty())
+        && (uses_utf16 != 1
+            || node_text_offset_min == -1
+            || node_text_offset_min != node_text_offset_max
+            || string.data.is_empty()
+        )
     }))]
     #[bw(calc(utf8_strings.iter().map(|(_, text)|
     StringData{ pos: 0, data: text.bytes().collect() }

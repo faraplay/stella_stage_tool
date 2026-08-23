@@ -13,6 +13,8 @@ use tokio::{
     task::JoinSet,
 };
 
+use crate::semaphore::PERMITS;
+
 mod prng;
 
 /// Decrypt all files in a directory. Searches the directory recursively.
@@ -66,6 +68,7 @@ async fn decrypt_directory_inner(
             .await?;
         } else if entry_metadata.is_file() {
             join_set.spawn(async move {
+                let _permit = PERMITS.acquire().await.unwrap();
                 match decrypt_file(&new_in_path, &new_out_path).await {
                     Ok(_) => {}
                     Err(error) => {
@@ -111,6 +114,7 @@ async fn encrypt_directory_inner(
             .await?;
         } else if entry_metadata.is_file() {
             join_set.spawn(async move {
+                let _permit = PERMITS.acquire().await.unwrap();
                 match encrypt_file(&new_in_path, &new_out_path, small).await {
                     Ok(_) => {}
                     Err(error) => {

@@ -11,6 +11,8 @@ use tokio::{
     task::JoinSet,
 };
 
+use crate::semaphore::PERMITS;
+
 use self::jxb::Jxb;
 
 mod jxb;
@@ -58,6 +60,7 @@ async fn extract_directory_inner(
             };
             if extension.to_ascii_lowercase() == "jxb" {
                 join_set.spawn(async move {
+                    let _permit = PERMITS.acquire().await.unwrap();
                     match extract_jxb_file(&new_in_path, &new_out_path.with_added_extension("xml"))
                         .await
                     {
@@ -69,6 +72,7 @@ async fn extract_directory_inner(
                 });
             } else if extension.to_ascii_lowercase() == "jxk" {
                 join_set.spawn(async move {
+                    let _permit = PERMITS.acquire().await.unwrap();
                     match extract_jxk_file(&new_in_path, &&new_out_path.with_extension("")).await {
                         Ok(_) => {}
                         Err(error) => {

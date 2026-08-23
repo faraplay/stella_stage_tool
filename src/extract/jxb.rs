@@ -144,12 +144,6 @@ pub struct Jxb {
         "incorrect stream position for string_region_pos, expected {:X}",
         string_region_pos,
     ))]
-    #[br(assert(
-        key_string_offsets.windows(2).all(
-            |window| window[0] < window[1]
-        ),
-        "key string offsets are not in ascending order",
-    ))]
     key_string_offsets: Vec<i32>,
 
     #[br(temp, calc(node_data_bs.iter().map(|b| b.text_offset).min().unwrap()))]

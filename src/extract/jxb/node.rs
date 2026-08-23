@@ -451,6 +451,9 @@ pub enum Value<'a> {
 }
 
 fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&str> {
+    if offset == -1 {
+        return Ok("");
+    }
     match strings.get(&offset) {
         Some(value) => Ok(value),
         None => Err(std::io::Error::new(

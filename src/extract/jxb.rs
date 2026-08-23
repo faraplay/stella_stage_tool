@@ -151,7 +151,9 @@ pub struct Jxb {
         } else {
             None
         })
-    }).max().unwrap_or(0)))]
+    }).chain(node_data_bs.iter().flat_map(|b|
+        if let NodeDataB::Version3{node_type_offset, ..} = b { Some(*node_type_offset) } else { None }
+    )).max().unwrap_or(0)))]
     #[bw(ignore)]
     key_value_offset_max: i32,
 
@@ -186,7 +188,7 @@ pub struct Jxb {
     utf8_region_end_offset: i32,
 
     #[brw(align_before = 0x10)]
-    #[br(args(uses_utf16, utf8_region_end_offset, node_text_offset_max.unwrap_or(0)))]
+    #[br(args(uses_utf16, utf8_region_end_offset, node_text_offset_max.unwrap_or(-1)))]
     string_pool: StringPool,
 }
 
@@ -336,9 +338,10 @@ struct StringPool {
     start_pos: i32,
 
     #[br(temp)]
-    #[br(parse_with = until(|string: &StringData<u8>|
-        string.pos + string.data.len() as i32 + 1 >= start_pos + utf8_region_end_offset
-    ))]
+    #[br(parse_with = until(|string: &StringData<u8>|{
+        (string.pos + string.data.len() as i32 + 1 >= start_pos + utf8_region_end_offset)
+        && (uses_utf16 != 1 || node_text_offset_max == -1 || string.data.is_empty())
+    }))]
     #[bw(calc(utf8_strings.iter().map(|(_, text)|
     StringData{ pos: 0, data: text.bytes().collect() }
     ).collect()))]

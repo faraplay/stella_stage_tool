@@ -62,13 +62,14 @@ pub struct Jxk {
 }
 
 impl Jxk {
+    pub fn jxb(&self) -> &Jxb {
+        &self.jxb
+    }
     pub fn root_node<'a>(&'a self) -> std::io::Result<Node<'a>> {
         self.jxb.root_node()
     }
 
-    pub fn get_metadatas<'a>(
-        &'a self,
-    ) -> std::io::Result<Vec<(NodeData<'a>, &'a FileMetadata)>> {
+    pub fn get_metadatas<'a>(&'a self) -> std::io::Result<Vec<(NodeData<'a>, &'a FileMetadata)>> {
         self.file_metadatas
             .iter()
             .map(|metadata| {

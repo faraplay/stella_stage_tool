@@ -54,6 +54,18 @@ enum Commands {
         /// The output file.
         out_path: PathBuf,
     },
+    /// Extracts text from a file or directory of files.
+    ///
+    /// Currently supported file types: jxb, jxk
+    ExtractText {
+        /// Extract from all files in the specified directory instead.
+        #[arg(short)]
+        recursive: bool,
+        /// The input file.
+        in_path: PathBuf,
+        /// The output file.
+        out_path: PathBuf,
+    },
     /// Builds a file from a given file or directory of files.
     ///
     /// Currently supported file types: jxb, jxk
@@ -128,6 +140,34 @@ async fn main() {
                         .expect("Error extracting jxb file!");
                 } else if extension == "jxk" {
                     extract::extract_jxk_file(in_path, out_path)
+                        .await
+                        .expect("Error extracting jxk file!");
+                } else {
+                    panic!("Unsupported extension!");
+                }
+                eprintln!("Extracted file.");
+            }
+        }
+        Commands::ExtractText {
+            recursive,
+            in_path,
+            out_path,
+        } => {
+            if *recursive {
+                extract::extract_text_directory(in_path, out_path)
+                    .await
+                    .expect("Error extracting files!");
+                eprintln!("Extracted files in directory.")
+            } else {
+                let Some(extension) = in_path.extension() else {
+                    panic!("File does not have an extension!");
+                };
+                if extension == "jxb" {
+                    extract::extract_text_jxb_file(in_path, out_path)
+                        .await
+                        .expect("Error extracting jxb file!");
+                } else if extension == "jxk" {
+                    extract::extract_text_jxk_file(in_path, out_path)
                         .await
                         .expect("Error extracting jxk file!");
                 } else {

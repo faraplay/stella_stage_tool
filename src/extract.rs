@@ -11,6 +11,8 @@ use tokio::{
     task::JoinSet,
 };
 
+use crate::semaphore::PERMITS;
+
 use self::jxb::Jxb;
 
 mod jxb;
@@ -58,21 +60,27 @@ async fn extract_directory_inner(
             };
             if extension.to_ascii_lowercase() == "jxb" {
                 join_set.spawn(async move {
+                    let _permit = PERMITS.acquire().await.unwrap();
                     match extract_jxb_file(&new_in_path, &new_out_path.with_added_extension("xml"))
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            eprintln!("Extracted {}", new_in_path.display());
+                        }
                         Err(error) => {
-                            eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                            eprintln!("Failed to extract {}: {error:?}", new_in_path.display());
                         }
                     }
                 });
             } else if extension.to_ascii_lowercase() == "jxk" {
                 join_set.spawn(async move {
+                    let _permit = PERMITS.acquire().await.unwrap();
                     match extract_jxk_file(&new_in_path, &&new_out_path.with_extension("")).await {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            eprintln!("Extracted {}", new_in_path.display());
+                        }
                         Err(error) => {
-                            eprintln!("Failed to decrypt {}: {error:?}", new_in_path.display());
+                            eprintln!("Failed to extract {}: {error:?}", new_in_path.display());
                         }
                     }
                 });
@@ -121,12 +129,15 @@ pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> 
             .into());
         }
         let file_name = node_data.get_text_tag("name")?;
-        let mut file_writer = File::create(out_path.join(file_name)).await?;
+        let trimmed_name_start_index = file_name.rfind('\\').map_or(0, |i| i + 1);
+        let trimmed_name = &file_name[trimmed_name_start_index..];
+        let mut file_writer = File::create(out_path.join(trimmed_name)).await?;
         reader
             .seek(std::io::SeekFrom::Start(metadata.data_offset as u64))
             .await?;
         let mut short_reader = reader.take(metadata.data_size as u64);
         tokio::io::copy(&mut short_reader, &mut file_writer).await?;
+        drop(file_writer);
         reader = short_reader.into_inner();
     }
     Ok(())
@@ -267,7 +278,9 @@ impl Jxk {
                 .into());
             }
             let file_name = node_data.get_text_tag("name")?;
-            let mut reader = File::open(dir_path.join(file_name)).await?;
+            let trimmed_name_start_index = file_name.rfind('\\').map_or(0, |i| i + 1);
+            let trimmed_name = &file_name[trimmed_name_start_index..];
+            let mut reader = File::open(dir_path.join(trimmed_name)).await?;
             let size = copy(&mut reader, writer).await?;
             file_metadata.data_offset = offset as i32;
             file_metadata.data_size = size as i32;

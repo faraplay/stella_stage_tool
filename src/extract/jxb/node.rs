@@ -12,11 +12,8 @@ use quick_xml::{
 };
 use tokio::io::{AsyncBufRead, AsyncWrite};
 
-use super::{Jxb, TagData};
-use crate::{
-    extract::jxb::{NodeDataA, NodeDataB, StringPool},
-    size::get_size,
-};
+use super::{Jxb, NodeDataA, NodeDataB, StringPool, TagData, TagDatas};
+use crate::size::get_size;
 
 #[derive(Debug, Default)]
 pub struct NodeData<'a> {
@@ -49,9 +46,15 @@ impl<'a> NodeData<'a> {
             .utf16_strings
             .as_ref()
             .unwrap_or(key_value_strings);
-        let node_type = Cow::Borrowed(get_string(b.node_type_offset, key_value_strings)?);
+        let node_type = Cow::Borrowed(match b {
+            NodeDataB::Version1 { .. } => "",
+            NodeDataB::Version2 { .. } => "",
+            NodeDataB::Version3 {
+                node_type_offset, ..
+            } => get_string(*node_type_offset, key_value_strings)?,
+        });
         let tags = b
-            .tags
+            .tags()
             .iter()
             .map(|tag| {
                 Ok((
@@ -60,7 +63,11 @@ impl<'a> NodeData<'a> {
                 ))
             })
             .collect::<std::io::Result<_>>()?;
-        let text = Cow::Borrowed(get_string(b.text_offset, text_strings)?);
+        let text = Cow::Borrowed(match b {
+            NodeDataB::Version1 { .. } => "",
+            NodeDataB::Version2 { .. } => "",
+            NodeDataB::Version3 { text_offset, .. } => get_string(*text_offset, text_strings)?,
+        });
         Ok(NodeData {
             node_type,
             tags,
@@ -96,8 +103,8 @@ impl<'a> NodeDataWithPointers<'a> {
         Ok(NodeDataWithPointers {
             data: NodeData::new(b, string_pool)?,
             parent_index: a.parent_index,
-            children_start_index: b.children_start_index,
-            child_count: b.child_count,
+            children_start_index: b.children_start_index(),
+            child_count: b.child_count(),
         })
     }
 
@@ -143,38 +150,63 @@ impl<'a> NodeDataWithPointers<'a> {
         let mut node_data_bs = Vec::new();
         let mut b_offset = 0;
         for node in node_list {
-            let tags: Vec<_> = node
-                .data
-                .tags
-                .into_iter()
-                .map(|(key, value)| TagData {
-                    key_offset: *utf8_offset_lookup.get(&key as &str).unwrap(),
-                    type_id: value.type_id(),
-                    value: value.to_i32(&utf8_offset_lookup).unwrap(),
-                })
-                .collect();
-            let tags_type_id = if tags.is_empty() {
-                0
-            } else if tags.iter().all(|tag| tag.type_id == tags[0].type_id) {
-                tags[0].type_id as u16
+            let tags: TagDatas = TagDatas {
+                tags: node
+                    .data
+                    .tags
+                    .into_iter()
+                    .map(|(key, value)| TagData {
+                        key_offset: *utf8_offset_lookup.get(&key as &str).unwrap(),
+                        type_id: value.type_id(),
+                        value: value.to_i32(&utf8_offset_lookup).unwrap(),
+                    })
+                    .collect(),
+            };
+            let tags_type_id = tags.tag_type_id();
+            let a: NodeDataA;
+            let b: NodeDataB;
+            if node.data.node_type.is_empty() && node.data.text.is_empty() {
+                if tags.tags.is_empty() {
+                    a = NodeDataA {
+                        node_version: 2,
+                        tags_type_id: 2,
+                        tag_count: node.child_count as u32,
+                        b_offset: node.children_start_index,
+                        parent_index: node.parent_index,
+                    };
+                    b = NodeDataB::Version2 {
+                        child_indexes: (node.children_start_index
+                            ..node.children_start_index + node.child_count)
+                            .collect(),
+                    };
+                } else {
+                    a = NodeDataA {
+                        node_version: 1,
+                        tags_type_id,
+                        tag_count: tags.tags.len() as u32,
+                        b_offset,
+                        parent_index: node.parent_index,
+                    };
+                    b = NodeDataB::Version1 { tags };
+                }
             } else {
-                1
-            };
-            let a = NodeDataA {
-                tags_type_id,
-                tag_count: tags.len() as u32,
-                b_offset,
-                parent_index: node.parent_index,
-            };
-            let b = NodeDataB {
-                node_type_offset: *utf8_offset_lookup
-                    .get(&node.data.node_type as &str)
-                    .unwrap(),
-                children_start_index: node.children_start_index,
-                child_count: node.child_count,
-                text_offset: *utf16_offset_lookup.get(&node.data.text as &str).unwrap(),
-                tags,
-            };
+                a = NodeDataA {
+                    node_version: 3,
+                    tags_type_id,
+                    tag_count: tags.tags.len() as u32,
+                    b_offset,
+                    parent_index: node.parent_index,
+                };
+                b = NodeDataB::Version3 {
+                    node_type_offset: *utf8_offset_lookup
+                        .get(&node.data.node_type as &str)
+                        .unwrap(),
+                    children_start_index: node.children_start_index,
+                    child_count: node.child_count,
+                    text_offset: *utf16_offset_lookup.get(&node.data.text as &str).unwrap(),
+                    tags,
+                };
+            }
             b_offset += get_size(&b) as i32;
             node_data_as.push(a);
             node_data_bs.push(b);
@@ -411,6 +443,7 @@ fn to_tags<'a>(attributes: Attributes) -> quick_xml::Result<IndexMap<Cow<'a, str
 
 #[derive(Debug)]
 pub enum Value<'a> {
+    Node(i32),
     Text(Cow<'a, str>),
     Float(f32),
     Int(i32),
@@ -418,6 +451,9 @@ pub enum Value<'a> {
 }
 
 fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&str> {
+    if offset == -1 {
+        return Ok("");
+    }
     match strings.get(&offset) {
         Some(value) => Ok(value),
         None => Err(std::io::Error::new(
@@ -430,6 +466,7 @@ fn get_string(offset: i32, strings: &BTreeMap<i32, String>) -> std::io::Result<&
 impl<'a> Value<'a> {
     fn new(b_tag: &TagData, strings: &'a BTreeMap<i32, String>) -> std::io::Result<Value<'a>> {
         Ok(match b_tag.type_id {
+            2 => Value::Node(b_tag.value),
             3 => Value::Text(Cow::Borrowed(get_string(b_tag.value, strings)?)),
             4 => Value::Float(f32::from_le_bytes(b_tag.value.to_le_bytes())),
             5 => Value::Int(b_tag.value),
@@ -462,6 +499,11 @@ impl<'a> Value<'a> {
         if string == "false" {
             return Value::Bool(false);
         }
+        if let Some(suffix) = string.strip_prefix("NODE")
+            && let Ok(value) = suffix.parse::<i32>()
+        {
+            return Value::Node(value);
+        }
         if let Ok(value) = string.parse::<i32>() {
             return Value::Int(value);
         }
@@ -473,6 +515,7 @@ impl<'a> Value<'a> {
 
     fn to_i32(&self, offset_lookup: &HashMap<&str, i32>) -> Option<i32> {
         match self {
+            Value::Node(value) => Some(*value),
             Value::Text(text) => offset_lookup.get(text as &str).copied(),
             Value::Float(value) => Some(i32::from_le_bytes(value.to_le_bytes())),
             Value::Int(value) => Some(*value),
@@ -482,6 +525,7 @@ impl<'a> Value<'a> {
 
     fn type_id(&self) -> u32 {
         match self {
+            Value::Node(_) => 2,
             Value::Text(_) => 3,
             Value::Float(_) => 4,
             Value::Int(_) => 5,
@@ -491,6 +535,7 @@ impl<'a> Value<'a> {
 
     fn to_string(&'a self) -> Cow<'a, str> {
         match self {
+            Value::Node(value) => Cow::Owned(format!("NODE{value}")),
             Value::Text(text) => Cow::Borrowed(text),
             Value::Float(value) => Cow::Owned(format!("{value:.6}")),
             Value::Int(value) => Cow::Owned(value.to_string()),

@@ -164,7 +164,15 @@ async fn write_csv_rows<'a>(
 ) -> std::io::Result<()> {
     for (file_name, index, text) in rows {
         writer
-            .write_all(format!("{},{},{},\n", file_name, index, text).as_bytes())
+            .write_all(
+                format!(
+                    "{},{},\"{}\",\n",
+                    file_name,
+                    index,
+                    text.replace('"', "\"\"")
+                )
+                .as_bytes(),
+            )
             .await?;
     }
     Ok(())

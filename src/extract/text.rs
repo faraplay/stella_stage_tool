@@ -103,6 +103,7 @@ async fn extract_text_directory_inner(
 struct Row {
     file_name: String,
     index: i32,
+    node_type: String,
     text: String,
 }
 
@@ -155,7 +156,7 @@ async fn extract_rows_from_jxb_file(in_path: &Path, file_name: &str) -> BinResul
 
 async fn write_header(writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Result<()> {
     writer
-        .write_all("Filename,Index,Original Text,Translated Text\n".as_bytes())
+        .write_all("Filename,Index,Node Name,Original Text,Translated Text\n".as_bytes())
         .await
 }
 
@@ -167,9 +168,10 @@ async fn write_csv_rows<'a>(
         writer
             .write_all(
                 format!(
-                    "{},{},\"{}\",\n",
+                    "{},{},{},\"{}\",\n",
                     row.file_name,
                     row.index,
+                    row.node_type,
                     row.text.replace('"', "\"\"")
                 )
                 .as_bytes(),
@@ -183,13 +185,13 @@ fn extract_text_jxb<'a>(jxb: &'a Jxb, file_name: &str) -> std::io::Result<Vec<Ro
     Ok(jxb
         .node_list()?
         .iter()
-        .map(|data| data.get_inner_text())
         .enumerate()
-        .filter(|(_, text)| !text.is_empty())
-        .map(|(index, text)| Row {
+        .filter(|(_, data)| !data.get_inner_text().is_empty())
+        .map(|(index, data)| Row {
             file_name: file_name.to_string(),
             index: index as i32,
-            text: text.to_string(),
+            node_type: data.get_type().to_string(),
+            text: data.get_inner_text().to_string(),
         })
         .collect())
 }

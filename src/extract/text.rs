@@ -47,7 +47,7 @@ async fn extract_text_directory_inner(
             let Some(extension) = new_in_path.extension() else {
                 continue;
             };
-            let Some(relative_file_path) = in_path
+            let Some(relative_file_path) = new_in_path
                 .strip_prefix(base_in_path)
                 .ok()
                 .and_then(|path| path.to_str())

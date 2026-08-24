@@ -5,7 +5,7 @@ use binrw::{
     helpers::{args_iter, until, until_exclusive},
 };
 
-use self::node::{Node, NodeData, NodeDataWithPointers};
+pub use self::node::{Node, NodeData, NodeDataWithPointers};
 use crate::size::get_size;
 
 mod node;

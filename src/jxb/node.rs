@@ -76,7 +76,7 @@ impl<'a> NodeData<'a> {
     }
 
     pub fn get_type(&self) -> &str {
-        &self.node_type as &str
+        &self.node_type
     }
 
     pub fn get_text_tag(&self, key: &str) -> std::io::Result<&str> {
@@ -91,6 +91,10 @@ impl<'a> NodeData<'a> {
             ));
         };
         Ok(value)
+    }
+
+    pub fn get_inner_text(&self) -> &str {
+        &self.text
     }
 }
 

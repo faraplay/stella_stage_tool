@@ -2,13 +2,14 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::{Parser, Subcommand};
 
+mod build;
 mod crypt;
+mod dir;
 mod extract;
+mod jxb;
+mod jxk;
+mod semaphore;
 mod size;
-
-mod semaphore {
-    pub static PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
-}
 
 #[derive(Parser)]
 struct Cli {
@@ -53,6 +54,26 @@ enum Commands {
         /// The output file.
         out_path: PathBuf,
     },
+    /// Extracts text from a file or directory of files.
+    ///
+    /// Currently supported file types: jxb, jxk
+    ExtractText {
+        /// Extract from all files in the specified directory instead.
+        #[arg(short)]
+        recursive: bool,
+        /// The input file.
+        in_path: PathBuf,
+        /// The output file.
+        out_path: PathBuf,
+        /// Pattern to filter the extracted text with.
+        ///
+        /// If a filter is specified, only text from nodes whose name
+        /// contains the filter string will be extracted.
+        /// For example, setting the filter `-f jp` will extract text from
+        /// nodes with name `jp` and `name_jp` but not `ch`.
+        #[arg(short)]
+        filter: Option<String>,
+    },
     /// Builds a file from a given file or directory of files.
     ///
     /// Currently supported file types: jxb, jxk
@@ -66,7 +87,7 @@ enum Commands {
     },
 }
 
-#[tokio::main(flavor="multi_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let cli = Cli::parse();
 
@@ -135,16 +156,45 @@ async fn main() {
                 eprintln!("Extracted file.");
             }
         }
+        Commands::ExtractText {
+            recursive,
+            in_path,
+            out_path,
+            filter,
+        } => {
+            if *recursive {
+                extract::extract_text_directory(in_path, out_path, filter.as_deref())
+                    .await
+                    .expect("Error extracting text from files!");
+                eprintln!("Extracted text from files in directory.")
+            } else {
+                let Some(extension) = in_path.extension() else {
+                    panic!("File does not have an extension!");
+                };
+                if extension == "jxb" {
+                    extract::extract_text_jxb_file(in_path, out_path, filter.as_deref())
+                        .await
+                        .expect("Error extracting text from jxb file!");
+                } else if extension == "jxk" {
+                    extract::extract_text_jxk_file(in_path, out_path, filter.as_deref())
+                        .await
+                        .expect("Error extracting text from jxk file!");
+                } else {
+                    panic!("Unsupported extension!");
+                }
+                eprintln!("Extracted text from file.");
+            }
+        }
         Commands::Build { in_path, out_path } => {
             let Some(extension) = out_path.extension() else {
                 panic!("Output file name does not have an extension!");
             };
             if extension == "jxb" {
-                extract::build_jxb_file(in_path, out_path)
+                build::build_jxb_file(in_path, out_path)
                     .await
                     .expect("Error building jxb file!");
             } else if extension == "jxk" {
-                extract::build_jxk_file(in_path, out_path)
+                build::build_jxk_file(in_path, out_path)
                     .await
                     .expect("Error building jxk file!");
             } else {

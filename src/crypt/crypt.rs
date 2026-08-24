@@ -8,14 +8,13 @@ use cbc::{Decryptor, Encryptor};
 use crc::{CRC_32_ISO_HDLC, Crc};
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use tokio::{
-    fs::{File, create_dir, metadata, read_dir},
+    fs::{File, metadata, read_dir},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     task::JoinSet,
 };
 
-use crate::semaphore::PERMITS;
-
-mod prng;
+use super::prng::MyPrng;
+use crate::{dir::try_create_dir, semaphore::PERMITS};
 
 /// Decrypt all files in a directory. Searches the directory recursively.
 pub async fn decrypt_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
@@ -42,17 +41,7 @@ async fn decrypt_directory_inner(
     out_path: &Path,
     join_set: &mut JoinSet<()>,
 ) -> std::io::Result<()> {
-    // try to create output directory
-    let create_result = create_dir(out_path).await;
-    match create_result {
-        Ok(_) => {}
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                Err(error)?;
-            }
-        }
-    }
-
+    try_create_dir(out_path).await?;
     // recurse over entries
     let mut in_dir = read_dir(in_path).await?;
     while let Some(entry) = in_dir.next_entry().await? {
@@ -87,17 +76,7 @@ async fn encrypt_directory_inner(
     small: bool,
     join_set: &mut JoinSet<()>,
 ) -> std::io::Result<()> {
-    // try to create output directory
-    let create_result = create_dir(out_path).await;
-    match create_result {
-        Ok(_) => {}
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                Err(error)?;
-            }
-        }
-    }
-
+    try_create_dir(out_path).await?;
     // recurse over entries
     let mut in_dir = read_dir(in_path).await?;
     while let Some(entry) = in_dir.next_entry().await? {
@@ -224,7 +203,7 @@ async fn encrypt_stream(
 }
 
 fn decrypt_first_kb(kb_buffer: &mut [u8], seed: u64) -> std::io::Result<()> {
-    let mut my_prng = prng::MyPrng::new(seed);
+    let mut my_prng = MyPrng::new(seed);
     for _ in 0..5 {
         my_prng.next_u64();
     }
@@ -252,7 +231,7 @@ const KEY_SHIFTS: [u32; 6] = [
 ];
 
 fn get_aes_key(seed: u64) -> [u8; 24] {
-    let mut my_prng = prng::MyPrng::new(seed);
+    let mut my_prng = MyPrng::new(seed);
     let mut aes_key = [0u8; 24];
     for i in 0..6 {
         let value = (my_prng.next_u64() as u32).wrapping_add(KEY_SHIFTS[i]) ^ KEY_MASKS[i];
@@ -262,7 +241,7 @@ fn get_aes_key(seed: u64) -> [u8; 24] {
 }
 
 fn get_iv(seed: u64) -> [u8; 16] {
-    let mut my_prng = prng::MyPrng::new(seed);
+    let mut my_prng = MyPrng::new(seed);
     let mut aes_iv = [0u8; 16];
     for i in 0..4 {
         let value = my_prng.next_u64() as u32;

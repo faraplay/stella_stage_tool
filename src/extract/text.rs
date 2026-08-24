@@ -29,7 +29,7 @@ pub async fn extract_text_directory(in_path: &Path, out_path: &Path) -> std::io:
 async fn extract_text_directory_inner(
     in_path: &Path,
     base_in_path: &Path,
-    join_set: &mut JoinSet<Vec<(String, i32, String)>>,
+    join_set: &mut JoinSet<Vec<Row>>,
 ) -> std::io::Result<()> {
     // recurse over entries
     let mut in_dir = read_dir(in_path).await?;
@@ -99,6 +99,13 @@ async fn extract_text_directory_inner(
     Ok(())
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct Row {
+    file_name: String,
+    index: i32,
+    text: String,
+}
+
 pub async fn extract_text_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
     let file_name = if let Some(file_name) = in_path.file_name() {
         file_name.to_str().unwrap_or("")
@@ -125,10 +132,7 @@ pub async fn extract_text_jxb_file(in_path: &Path, out_path: &Path) -> BinResult
     Ok(())
 }
 
-async fn extract_rows_from_jxk_file(
-    in_path: &Path,
-    file_name: &str,
-) -> BinResult<Vec<(String, i32, String)>> {
+async fn extract_rows_from_jxk_file(in_path: &Path, file_name: &str) -> BinResult<Vec<Row>> {
     let mut reader = File::open(in_path).await?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer).await?;
@@ -140,10 +144,7 @@ async fn extract_rows_from_jxk_file(
     Ok(extract_text_jxb(&jxk.jxb(), file_name)?)
 }
 
-async fn extract_rows_from_jxb_file(
-    in_path: &Path,
-    file_name: &str,
-) -> BinResult<Vec<(String, i32, String)>> {
+async fn extract_rows_from_jxb_file(in_path: &Path, file_name: &str) -> BinResult<Vec<Row>> {
     let mut reader = File::open(in_path).await?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer).await?;
@@ -160,16 +161,16 @@ async fn write_header(writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Res
 
 async fn write_csv_rows<'a>(
     writer: &mut (impl AsyncWriteExt + Unpin),
-    rows: impl IntoIterator<Item = (String, i32, String)>,
+    rows: impl IntoIterator<Item = Row>,
 ) -> std::io::Result<()> {
-    for (file_name, index, text) in rows {
+    for row in rows {
         writer
             .write_all(
                 format!(
                     "{},{},\"{}\",\n",
-                    file_name,
-                    index,
-                    text.replace('"', "\"\"")
+                    row.file_name,
+                    row.index,
+                    row.text.replace('"', "\"\"")
                 )
                 .as_bytes(),
             )
@@ -178,16 +179,17 @@ async fn write_csv_rows<'a>(
     Ok(())
 }
 
-fn extract_text_jxb<'a>(
-    jxb: &'a Jxb,
-    file_name: &str,
-) -> std::io::Result<Vec<(String, i32, String)>> {
+fn extract_text_jxb<'a>(jxb: &'a Jxb, file_name: &str) -> std::io::Result<Vec<Row>> {
     Ok(jxb
         .node_list()?
         .iter()
         .map(|data| data.get_inner_text())
         .enumerate()
         .filter(|(_, text)| !text.is_empty())
-        .map(|(index, text)| (file_name.to_string(), index as i32, text.to_string()))
+        .map(|(index, text)| Row {
+            file_name: file_name.to_string(),
+            index: index as i32,
+            text: text.to_string(),
+        })
         .collect())
 }

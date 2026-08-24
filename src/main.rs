@@ -2,6 +2,7 @@ use std::{path::PathBuf, time::Instant};
 
 use clap::{Parser, Subcommand};
 
+mod build;
 mod crypt;
 mod extract;
 mod jxb;
@@ -142,11 +143,11 @@ async fn main() {
                 panic!("Output file name does not have an extension!");
             };
             if extension == "jxb" {
-                extract::build_jxb_file(in_path, out_path)
+                build::build_jxb_file(in_path, out_path)
                     .await
                     .expect("Error building jxb file!");
             } else if extension == "jxk" {
-                extract::build_jxk_file(in_path, out_path)
+                build::build_jxk_file(in_path, out_path)
                     .await
                     .expect("Error building jxk file!");
             } else {

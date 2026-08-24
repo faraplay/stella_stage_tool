@@ -65,6 +65,14 @@ enum Commands {
         in_path: PathBuf,
         /// The output file.
         out_path: PathBuf,
+        /// Pattern to filter the extracted text with.
+        ///
+        /// If a filter is specified, only text from nodes whose name
+        /// contains the filter string will be extracted.
+        /// For example, setting the filter `-f jp` will extract text from
+        /// nodes with name `jp` and `name_jp` but not `ch`.
+        #[arg(short)]
+        filter: Option<String>,
     },
     /// Builds a file from a given file or directory of files.
     ///
@@ -152,28 +160,29 @@ async fn main() {
             recursive,
             in_path,
             out_path,
+            filter,
         } => {
             if *recursive {
-                extract::extract_text_directory(in_path, out_path)
+                extract::extract_text_directory(in_path, out_path, filter.as_deref())
                     .await
-                    .expect("Error extracting files!");
-                eprintln!("Extracted files in directory.")
+                    .expect("Error extracting text from files!");
+                eprintln!("Extracted text from files in directory.")
             } else {
                 let Some(extension) = in_path.extension() else {
                     panic!("File does not have an extension!");
                 };
                 if extension == "jxb" {
-                    extract::extract_text_jxb_file(in_path, out_path)
+                    extract::extract_text_jxb_file(in_path, out_path, filter.as_deref())
                         .await
-                        .expect("Error extracting jxb file!");
+                        .expect("Error extracting text from jxb file!");
                 } else if extension == "jxk" {
-                    extract::extract_text_jxk_file(in_path, out_path)
+                    extract::extract_text_jxk_file(in_path, out_path, filter.as_deref())
                         .await
-                        .expect("Error extracting jxk file!");
+                        .expect("Error extracting text from jxk file!");
                 } else {
                     panic!("Unsupported extension!");
                 }
-                eprintln!("Extracted file.");
+                eprintln!("Extracted text from file.");
             }
         }
         Commands::Build { in_path, out_path } => {

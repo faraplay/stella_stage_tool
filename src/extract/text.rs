@@ -13,7 +13,11 @@ use crate::jxb::Jxb;
 use crate::jxk::Jxk;
 
 /// Extract all files in a directory. Searches the directory recursively.
-pub async fn extract_text_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {
+pub async fn extract_text_directory(
+    in_path: &Path,
+    out_path: &Path,
+    filter: Option<&str>,
+) -> std::io::Result<()> {
     let mut set = JoinSet::new();
     extract_text_directory_inner(in_path, in_path, &mut set).await?;
     let mut rows: Vec<_> = set.join_all().await.into_iter().flatten().collect();
@@ -21,7 +25,7 @@ pub async fn extract_text_directory(in_path: &Path, out_path: &Path) -> std::io:
     rows.sort();
     let mut writer = File::create(out_path).await?;
     write_header(&mut writer).await?;
-    write_csv_rows(&mut writer, rows).await?;
+    write_csv_rows(&mut writer, rows, filter).await?;
 
     Ok(())
 }
@@ -107,7 +111,11 @@ struct Row {
     text: String,
 }
 
-pub async fn extract_text_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+pub async fn extract_text_jxk_file(
+    in_path: &Path,
+    out_path: &Path,
+    filter: Option<&str>,
+) -> BinResult<()> {
     let file_name = if let Some(file_name) = in_path.file_name() {
         file_name.to_str().unwrap_or("")
     } else {
@@ -116,11 +124,15 @@ pub async fn extract_text_jxk_file(in_path: &Path, out_path: &Path) -> BinResult
     let rows = extract_rows_from_jxk_file(in_path, file_name).await?;
     let mut writer = File::create(out_path).await?;
     write_header(&mut writer).await?;
-    write_csv_rows(&mut writer, rows).await?;
+    write_csv_rows(&mut writer, rows, filter).await?;
     Ok(())
 }
 
-pub async fn extract_text_jxb_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
+pub async fn extract_text_jxb_file(
+    in_path: &Path,
+    out_path: &Path,
+    filter: Option<&str>,
+) -> BinResult<()> {
     let file_name = if let Some(file_name) = in_path.file_name() {
         file_name.to_str().unwrap_or("")
     } else {
@@ -129,7 +141,7 @@ pub async fn extract_text_jxb_file(in_path: &Path, out_path: &Path) -> BinResult
     let rows = extract_rows_from_jxb_file(in_path, file_name).await?;
     let mut writer = File::create(out_path).await?;
     write_header(&mut writer).await?;
-    write_csv_rows(&mut writer, rows).await?;
+    write_csv_rows(&mut writer, rows, filter).await?;
     Ok(())
 }
 
@@ -163,8 +175,14 @@ async fn write_header(writer: &mut (impl AsyncWriteExt + Unpin)) -> std::io::Res
 async fn write_csv_rows<'a>(
     writer: &mut (impl AsyncWriteExt + Unpin),
     rows: impl IntoIterator<Item = Row>,
+    filter: Option<&str>,
 ) -> std::io::Result<()> {
     for row in rows {
+        if let Some(pattern) = filter
+            && !row.node_type.contains(pattern)
+        {
+            continue;
+        }
         writer
             .write_all(
                 format!(

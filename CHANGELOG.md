@@ -1,3 +1,10 @@
+# Version 0.4.0
+
+Added:
+
+- `extract-text` command that extracts text from `jxb` and `jxk` files
+    - `-f` filter option to only extract text in a specific language
+
 # Version 0.3.2
 
 Changed:

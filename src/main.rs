@@ -8,11 +8,8 @@ mod dir;
 mod extract;
 mod jxb;
 mod jxk;
+mod semaphore;
 mod size;
-
-mod semaphore {
-    pub static PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(16);
-}
 
 #[derive(Parser)]
 struct Cli {

@@ -8,12 +8,12 @@ use cbc::{Decryptor, Encryptor};
 use crc::{CRC_32_ISO_HDLC, Crc};
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use tokio::{
-    fs::{File, create_dir, metadata, read_dir},
+    fs::{File, metadata, read_dir},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     task::JoinSet,
 };
 
-use crate::semaphore::PERMITS;
+use crate::{dir::try_create_dir, semaphore::PERMITS};
 
 mod prng;
 
@@ -42,17 +42,7 @@ async fn decrypt_directory_inner(
     out_path: &Path,
     join_set: &mut JoinSet<()>,
 ) -> std::io::Result<()> {
-    // try to create output directory
-    let create_result = create_dir(out_path).await;
-    match create_result {
-        Ok(_) => {}
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                Err(error)?;
-            }
-        }
-    }
-
+    try_create_dir(out_path).await?;
     // recurse over entries
     let mut in_dir = read_dir(in_path).await?;
     while let Some(entry) = in_dir.next_entry().await? {
@@ -87,17 +77,7 @@ async fn encrypt_directory_inner(
     small: bool,
     join_set: &mut JoinSet<()>,
 ) -> std::io::Result<()> {
-    // try to create output directory
-    let create_result = create_dir(out_path).await;
-    match create_result {
-        Ok(_) => {}
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                Err(error)?;
-            }
-        }
-    }
-
+    try_create_dir(out_path).await?;
     // recurse over entries
     let mut in_dir = read_dir(in_path).await?;
     while let Some(entry) = in_dir.next_entry().await? {

@@ -3,12 +3,12 @@ use std::{io::Cursor, path::Path};
 use binrw::{BinRead, BinResult};
 use quick_xml::Writer;
 use tokio::{
-    fs::{File, create_dir, metadata, read_dir},
+    fs::{File, metadata, read_dir},
     io::{AsyncReadExt, AsyncSeekExt},
     task::JoinSet,
 };
 
-use crate::semaphore::PERMITS;
+use crate::{dir::try_create_dir, semaphore::PERMITS};
 
 use crate::jxb::Jxb;
 use crate::jxk::Jxk;
@@ -26,17 +26,7 @@ async fn extract_directory_inner(
     out_path: &Path,
     join_set: &mut JoinSet<()>,
 ) -> std::io::Result<()> {
-    // try to create output directory
-    let create_result = create_dir(out_path).await;
-    match create_result {
-        Ok(_) => {}
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                Err(error)?;
-            }
-        }
-    }
-
+    try_create_dir(out_path).await?;
     // recurse over entries
     let mut in_dir = read_dir(in_path).await?;
     while let Some(entry) = in_dir.next_entry().await? {
@@ -87,17 +77,7 @@ async fn extract_directory_inner(
 }
 
 pub async fn extract_jxk_file(in_path: &Path, out_path: &Path) -> BinResult<()> {
-    // try to create output directory
-    let create_result = create_dir(out_path).await;
-    match create_result {
-        Ok(_) => {}
-        Err(error) => {
-            if error.kind() != std::io::ErrorKind::AlreadyExists {
-                Err(error)?;
-            }
-        }
-    }
-
+    try_create_dir(out_path).await?;
     let mut reader = File::open(in_path).await?;
     let mut buffer = Vec::new();
     reader.read_to_end(&mut buffer).await?;

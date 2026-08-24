@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod build;
 mod crypt;
+mod dir;
 mod extract;
 mod jxb;
 mod jxk;

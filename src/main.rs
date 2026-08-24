@@ -4,6 +4,8 @@ use clap::{Parser, Subcommand};
 
 mod crypt;
 mod extract;
+mod jxb;
+mod jxk;
 mod size;
 
 mod semaphore {
@@ -66,7 +68,7 @@ enum Commands {
     },
 }
 
-#[tokio::main(flavor="multi_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() {
     let cli = Cli::parse();
 

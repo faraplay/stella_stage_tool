@@ -10,11 +10,8 @@ use tokio::{
 
 use crate::semaphore::PERMITS;
 
-use self::jxb::Jxb;
-use self::jxk::Jxk;
-
-mod jxb;
-mod jxk;
+use crate::jxb::Jxb;
+use crate::jxk::Jxk;
 
 /// Extract all files in a directory. Searches the directory recursively.
 pub async fn extract_directory(in_path: &Path, out_path: &Path) -> std::io::Result<()> {

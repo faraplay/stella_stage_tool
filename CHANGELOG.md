@@ -1,3 +1,9 @@
+# Version 0.3.2
+
+Changed:
+
+- More accurate `jxb`/`jxk` extraction algorithm that works on more files
+
 # Version 0.3.1
 
 Changed:

@@ -438,7 +438,7 @@ impl<'a> Jxb {
     }
 
     pub fn inject_text<'b>(
-        self,
+        &'a self,
         inject_rows: impl IntoIterator<Item = &'b InjectRow>,
     ) -> std::io::Result<Self> {
         let mut node_list = self.node_list_with_pointers()?;

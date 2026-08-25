@@ -6,7 +6,68 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
 };
 
-use crate::{csv::parse_csv, jxb::Jxb};
+use crate::{csv::parse_csv, jxb::Jxb, jxk::Jxk};
+
+pub async fn inject_text_jxk_file(csv_path: &Path, edit_path: &Path) -> BinResult<()> {
+    let inject_rows = read_inject_rows(csv_path).await?;
+
+    let mut reader = File::open(edit_path).await?;
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer).await?;
+    let mut cursor = Cursor::new(buffer);
+    let jxk = Jxk::read(&mut cursor)?;
+    buffer = cursor.into_inner();
+
+    let new_jxb = jxk.jxb().inject_text(&inject_rows)?;
+    let mut new_jxk = Jxk::new(new_jxb)?;
+    let file_datas = jxk.get_file_datas(&buffer)?;
+
+    let mut writer = File::create(edit_path).await?;
+    new_jxk
+        .add_file_datas_and_write(&file_datas, &mut writer)
+        .await?;
+    Ok(())
+}
+
+pub async fn inject_text_jxb_file(csv_path: &Path, edit_path: &Path) -> BinResult<()> {
+    let inject_rows = read_inject_rows(csv_path).await?;
+
+    let mut reader = File::open(edit_path).await?;
+    let mut buffer = Vec::new();
+    reader.read_to_end(&mut buffer).await?;
+    let mut cursor = Cursor::new(buffer);
+    let jxb = Jxb::read(&mut cursor)?;
+
+    let new_jxb = jxb.inject_text(&inject_rows)?;
+
+    let buffer = Vec::new();
+    let mut cursor = Cursor::new(buffer);
+    new_jxb.write_le(&mut cursor)?;
+
+    let mut writer = File::create(edit_path).await?;
+    writer.write_all(&cursor.into_inner()).await?;
+    Ok(())
+}
+
+async fn read_inject_rows(csv_path: &Path) -> Result<Vec<InjectRow>, binrw::Error> {
+    let mut csv_reader = File::open(csv_path).await?;
+    let mut csv_text = String::new();
+    csv_reader.read_to_string(&mut csv_text).await?;
+    drop(csv_reader);
+    let Ok((_, rows)) = parse_csv(&csv_text) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Could not parse csv file!",
+        )
+        .into());
+    };
+    let inject_rows = rows
+        .into_iter()
+        .skip(1)
+        .map(InjectRow::from_row)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    Ok(inject_rows)
+}
 
 #[derive(Debug)]
 pub struct InjectRow {
@@ -42,41 +103,4 @@ impl InjectRow {
             inject_text,
         })
     }
-}
-
-pub async fn inject_text_jxb_file(csv_path: &Path, edit_path: &Path) -> BinResult<()> {
-    let mut csv_reader = File::open(csv_path).await?;
-    let mut csv_text = String::new();
-    csv_reader.read_to_string(&mut csv_text).await?;
-    drop(csv_reader);
-
-    let Ok((_, rows)) = parse_csv(&csv_text) else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Could not parse csv file!",
-        )
-        .into());
-    };
-
-    let inject_rows = rows
-        .into_iter()
-        .skip(1)
-        .map(InjectRow::from_row)
-        .collect::<std::io::Result<Vec<_>>>()?;
-
-    let mut reader = File::open(edit_path).await?;
-    let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).await?;
-    let mut cursor = Cursor::new(buffer);
-    let jxb = Jxb::read(&mut cursor)?;
-
-    let new_jxb = jxb.inject_text(&inject_rows)?;
-
-    let buffer = Vec::new();
-    let mut cursor = Cursor::new(buffer);
-    new_jxb.write_le(&mut cursor)?;
-
-    let mut writer = File::create(edit_path).await?;
-    writer.write_all(&cursor.into_inner()).await?;
-    Ok(())
 }

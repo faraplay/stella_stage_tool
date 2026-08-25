@@ -80,6 +80,21 @@ impl Jxk {
             .collect()
     }
 
+    pub fn get_file_datas<'a, 'b>(&'a self, buffer: &'b [u8]) -> std::io::Result<Vec<&'b [u8]>> {
+        self.file_metadatas.iter().map(|metadata| {
+            let start = metadata.data_offset as usize;
+            let end = start + metadata.data_size as usize;
+            if end > buffer.len() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Metadata points to data outside the buffer",
+                ))
+            } else {
+                Ok(&buffer[start..end])
+            }
+        }).collect()
+    }
+
     /// Create a new Jxk from a Jxb.
     /// Note that the file offsets and sizes are set to zero and need to be filled in.
     pub fn new(jxb: Jxb) -> std::io::Result<Jxk> {
@@ -129,6 +144,39 @@ impl Jxk {
             let size = copy(&mut reader, writer).await?;
             file_metadata.data_offset = offset as i32;
             file_metadata.data_size = size as i32;
+        }
+        writer.seek(Start(0)).await?;
+        let buffer = Vec::new();
+        let mut cursor = Cursor::new(buffer);
+        self.write_le(&mut cursor)?;
+        writer.write_all(&cursor.into_inner()).await?;
+
+        Ok(())
+    }
+    pub async fn add_file_datas_and_write(
+        &mut self,
+        file_datas: &[&[u8]],
+        writer: &mut (impl AsyncWriteExt + AsyncSeekExt + Unpin),
+    ) -> BinResult<()> {
+        if file_datas.len() != self.file_metadatas.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Incorrect number of files supplied to jxk writing!",
+            )
+            .into());
+        }
+        writer
+            .write_all(&vec![0u8; crate::size::get_size(self)])
+            .await?;
+        for (file_metadata, file_data) in self.file_metadatas.iter_mut().zip(file_datas) {
+            let old_offset = writer.stream_position().await?;
+            let offset = old_offset.next_multiple_of(0x10);
+            writer
+                .write_all(&vec![0u8; (offset - old_offset) as usize])
+                .await?;
+            writer.write_all(file_data).await?;
+            file_metadata.data_offset = offset as i32;
+            file_metadata.data_size = file_data.len() as i32;
         }
         writer.seek(Start(0)).await?;
         let buffer = Vec::new();

@@ -212,6 +212,9 @@ async fn main() {
                     .await
                     .expect("Error injecting text into jxb file!");
             } else if extension == "jxk" {
+                inject::inject_text_jxk_file(csv_path, edit_path)
+                    .await
+                    .expect("Error injecting text into jxk file!");
             } else {
                 panic!("Unsupported extension!");
             }

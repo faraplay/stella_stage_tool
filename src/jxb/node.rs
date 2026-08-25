@@ -112,6 +112,12 @@ impl<'a> NodeDataWithPointers<'a> {
         })
     }
 
+    pub fn inject_text(&mut self, text: Cow<'a, str>) {
+        if !text.is_empty() {
+            self.data.text = text;
+        }
+    }
+
     pub fn into_jxb(node_list: Vec<NodeDataWithPointers<'a>>) -> Jxb {
         let mut key_strings = BTreeSet::<Cow<'a, str>>::new();
         let mut value_strings = BTreeSet::<Cow<'a, str>>::new();

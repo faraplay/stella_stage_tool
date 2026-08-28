@@ -1,3 +1,9 @@
+# Version 0.5.0
+
+Added:
+
+- `inject-text` command that injects text from a `csv` file into `jxb` and `jxk` files
+
 # Version 0.4.0
 
 Added:

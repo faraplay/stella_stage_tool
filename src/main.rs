@@ -204,21 +204,28 @@ async fn main() {
             csv_path,
             edit_path,
         } => {
-            let Some(extension) = edit_path.extension() else {
-                panic!("File name of the file to edit does not have an extension!");
-            };
-            if extension == "jxb" {
-                inject::inject_text_jxb_file(csv_path, edit_path)
+            if *recursive {
+                inject::inject_text_dir_files(csv_path, edit_path)
                     .await
-                    .expect("Error injecting text into jxb file!");
-            } else if extension == "jxk" {
-                inject::inject_text_jxk_file(csv_path, edit_path)
-                    .await
-                    .expect("Error injecting text into jxk file!");
+                    .expect("Error injecting text into files in directory!");
+                eprintln!("Injected text into files in directory.");
             } else {
-                panic!("Unsupported extension!");
+                let Some(extension) = edit_path.extension() else {
+                    panic!("File name of the file to edit does not have an extension!");
+                };
+                if extension == "jxb" {
+                    inject::inject_text_jxb_file(csv_path, edit_path)
+                        .await
+                        .expect("Error injecting text into jxb file!");
+                } else if extension == "jxk" {
+                    inject::inject_text_jxk_file(csv_path, edit_path)
+                        .await
+                        .expect("Error injecting text into jxk file!");
+                } else {
+                    panic!("Unsupported extension!");
+                }
+                eprintln!("Injected text into file.");
             }
-            eprintln!("Injected text into file.");
         }
         Commands::Build { in_path, out_path } => {
             let Some(extension) = out_path.extension() else {

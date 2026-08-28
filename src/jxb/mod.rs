@@ -443,8 +443,7 @@ impl<'a> Jxb {
     ) -> std::io::Result<Self> {
         let mut node_list = self.node_list_with_pointers()?;
         for inject_row in inject_rows {
-            node_list[inject_row.index as usize]
-                .inject_text(std::borrow::Cow::Borrowed(&inject_row.inject_text));
+            node_list[inject_row.index as usize].inject_text(inject_row)?;
         }
         Ok(NodeDataWithPointers::into_jxb(node_list))
     }

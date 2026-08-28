@@ -4,8 +4,10 @@ use clap::{Parser, Subcommand};
 
 mod build;
 mod crypt;
+mod csv;
 mod dir;
 mod extract;
+mod inject;
 mod jxb;
 mod jxk;
 mod semaphore;
@@ -73,6 +75,18 @@ enum Commands {
         /// nodes with name `jp` and `name_jp` but not `ch`.
         #[arg(short)]
         filter: Option<String>,
+    },
+    /// Injects text from a `csv` file into files.
+    ///
+    /// Currently supported file types: jxb, jxk
+    InjectText {
+        /// Inject into files in the specified directory instead.
+        #[arg(short)]
+        recursive: bool,
+        /// The csv file containing the text to inject.
+        csv_path: PathBuf,
+        /// The file to inject text into.
+        edit_path: PathBuf,
     },
     /// Builds a file from a given file or directory of files.
     ///
@@ -183,6 +197,34 @@ async fn main() {
                     panic!("Unsupported extension!");
                 }
                 eprintln!("Extracted text from file.");
+            }
+        }
+        Commands::InjectText {
+            recursive,
+            csv_path,
+            edit_path,
+        } => {
+            if *recursive {
+                inject::inject_text_dir_files(csv_path, edit_path)
+                    .await
+                    .expect("Error injecting text into files in directory!");
+                eprintln!("Injected text into files in directory.");
+            } else {
+                let Some(extension) = edit_path.extension() else {
+                    panic!("File name of the file to edit does not have an extension!");
+                };
+                if extension == "jxb" {
+                    inject::inject_text_jxb_file(csv_path, edit_path)
+                        .await
+                        .expect("Error injecting text into jxb file!");
+                } else if extension == "jxk" {
+                    inject::inject_text_jxk_file(csv_path, edit_path)
+                        .await
+                        .expect("Error injecting text into jxk file!");
+                } else {
+                    panic!("Unsupported extension!");
+                }
+                eprintln!("Injected text into file.");
             }
         }
         Commands::Build { in_path, out_path } => {

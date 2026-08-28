@@ -13,7 +13,7 @@ use quick_xml::{
 use tokio::io::{AsyncBufRead, AsyncWrite};
 
 use super::{Jxb, NodeDataA, NodeDataB, StringPool, TagData, TagDatas};
-use crate::size::get_size;
+use crate::{inject::InjectRow, size::get_size};
 
 #[derive(Debug, Default)]
 pub struct NodeData<'a> {
@@ -110,6 +110,25 @@ impl<'a> NodeDataWithPointers<'a> {
             children_start_index: b.children_start_index(),
             child_count: b.child_count(),
         })
+    }
+
+    pub fn inject_text(&mut self, row: &'a InjectRow) -> std::io::Result<()> {
+        if self.child_count != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Attempted to inject text into a node with children!",
+            ));
+        }
+        if row.node_type != self.data.node_type {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Node type of text to inject does not match the node!",
+            ));
+        }
+        if !row.inject_text.is_empty() {
+            self.data.text = Cow::Borrowed(&row.inject_text);
+        }
+        Ok(())
     }
 
     pub fn into_jxb(node_list: Vec<NodeDataWithPointers<'a>>) -> Jxb {

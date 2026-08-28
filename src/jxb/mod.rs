@@ -6,7 +6,7 @@ use binrw::{
 };
 
 pub use self::node::{Node, NodeData, NodeDataWithPointers};
-use crate::size::get_size;
+use crate::{inject::InjectRow, size::get_size};
 
 mod node;
 
@@ -437,14 +437,29 @@ impl<'a> Jxb {
             .collect()
     }
 
+    pub fn inject_text<'b>(
+        &'a self,
+        inject_rows: impl IntoIterator<Item = &'b InjectRow>,
+    ) -> std::io::Result<Self> {
+        let mut node_list = self.node_list_with_pointers()?;
+        for inject_row in inject_rows {
+            node_list[inject_row.index as usize].inject_text(inject_row)?;
+        }
+        Ok(NodeDataWithPointers::into_jxb(node_list))
+    }
+
     pub fn get_node_data(&'a self, index: i32) -> std::io::Result<NodeData<'a>> {
         NodeData::new(&self.node_data_bs[index as usize], &self.string_pool)
     }
 
-    pub fn root_node(&'a self) -> std::io::Result<Node<'a>> {
-        let node_list = zip(&self.node_data_as, &self.node_data_bs)
+    fn node_list_with_pointers(&'a self) -> std::io::Result<Vec<NodeDataWithPointers<'a>>> {
+        zip(&self.node_data_as, &self.node_data_bs)
             .map(|(a, b)| NodeDataWithPointers::new(a, b, &self.string_pool))
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    pub fn root_node(&'a self) -> std::io::Result<Node<'a>> {
+        let node_list = self.node_list_with_pointers()?;
         Ok(Node::new(node_list, 0))
     }
 
